@@ -164,15 +164,19 @@ function M.generate(bufnr)
 
   acquire_fake_client()
   tokens[bufnr] = token
-  emit_progress("begin", token, "git-commit-ai", "starting…")
 
-  local hl = virt_hl()
-  if hl then
-    marks[bufnr] = vim.api.nvim_buf_set_extmark(bufnr, ns, 0, 0, {
-      virt_text = { { "  generating commit message... type your own to cancel.", hl } },
-      virt_text_pos = "eol",
-    })
-  end
+  -- Defer one tick so the buffer is visible before Noice/extmark appear.
+  vim.schedule(function()
+    if gens[bufnr] ~= my_gen then return end
+    emit_progress("begin", token, "git-commit-ai", "starting…")
+    local hl = virt_hl()
+    if hl then
+      marks[bufnr] = vim.api.nvim_buf_set_extmark(bufnr, ns, 0, 0, {
+        virt_text = { { "  generating commit message... type your own to cancel.", hl } },
+        virt_text_pos = "eol",
+      })
+    end
+  end)
 
   -- Per-job closure state
   local j_body = {}      -- streamed body lines ("- path: summary")
@@ -282,7 +286,7 @@ function M.generate(bufnr)
 
         if code ~= 0 then
           local msg = table.concat(j_err, "\n")
-          if msg ~= "" then
+          if msg ~= "" and not msg:match("no staged changes") then
             vim.notify("git-commit-ai: " .. msg, vim.log.levels.WARN)
           end
           return
