@@ -244,7 +244,18 @@ Output only the subject line — nothing else, no explanation.";
 
 /// Preferred Ollama models, in order. The first one found on the running
 /// Ollama instance is used when no model is explicitly configured.
-const OLLAMA_MODEL_PREFERENCE: &[&str] = &["qwen3.5:2b", "qwen2.5:1.5b", "qwen3.5:0.8b"];
+/// Preferred Ollama models in descending order of quality.
+/// gemma4 tags: "e4b" = 8B Q4_K_M, "e2b" = smaller efficient variant.
+/// The 12b and larger models give the best results if you have the VRAM/RAM.
+const OLLAMA_MODEL_PREFERENCE: &[&str] = &[
+    "gemma4:12b",
+    "gemma4:e4b",
+    "gemma4:e2b",
+    "gemma4:26b-a4b",
+    "qwen3.5:2b",
+    "qwen2.5:1.5b",
+    "qwen3.5:0.8b",
+];
 
 async fn build_provider(cli: &Cli, cfg: &Config) -> Result<LlmProvider> {
     match cli.provider.to_lowercase().as_str() {
