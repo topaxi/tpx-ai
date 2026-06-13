@@ -1,0 +1,15 @@
+[package]
+name = "git-commit"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "git-commit"
+path = "src/main.rs"
+
+[dependencies]
+llm = { path = "../../crates/llm" }
+anyhow.workspace = true
+tokio.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+glob = "0.3"
