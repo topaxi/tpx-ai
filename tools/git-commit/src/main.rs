@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use config::Config;
 use llm::{LlmProvider, Message};
+use std::io::Write as _;
 use std::process::Command;
 
 #[derive(Parser)]
@@ -77,22 +78,35 @@ async fn main() -> Result<()> {
         bail!("failed to parse any file diffs — this is a bug");
     }
 
+    // Dry-run: stream body lines to stdout as each file completes, subject last.
+    // The plugin reads these progressively to update virtual text.
+    if cli.dry_run {
+        eprintln!("summarizing {} file(s)…", file_diffs.len());
+        let mut summaries = Vec::with_capacity(file_diffs.len());
+        for (path, content) in &file_diffs {
+            eprint!("  {path}…");
+            let summary = summarize_file_diff(path, content, &provider)
+                .await
+                .with_context(|| format!("failed to summarize {path}"))?;
+            eprintln!(" {summary}");
+            summaries.push(format!("{path}: {summary}"));
+            println!("- {path}: {summary}");
+            std::io::stdout().flush().ok();
+        }
+        eprintln!("generating subject…");
+        let subject = generate_subject(&summaries, cli.context.as_deref(), &provider).await?;
+        println!("{}", subject.trim());
+        return Ok(());
+    }
+
     let summaries = summarize_all(&file_diffs, &provider).await?;
     let subject = generate_subject(&summaries, cli.context.as_deref(), &provider).await?;
-    // summaries are "path: description" — render as "- path: description" bullets
     let body = summaries
         .iter()
         .map(|s| format!("- {s}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let message = format!("{}\n\n{}", subject.trim(), body);
-
-    let message = message.trim().to_string();
-
-    if cli.dry_run {
-        println!("{message}");
-        return Ok(());
-    }
+    let message = format!("{}\n\n{}", subject.trim(), body).trim().to_string();
 
     run_commit(&message)?;
     println!("✓ {message}");

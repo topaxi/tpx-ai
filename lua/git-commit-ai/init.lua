@@ -1,47 +1,94 @@
 local M = {}
 
----@class GitCommitAIConfig
----@field bin string        binary name or absolute path (must be in PATH if name only)
----@field provider string?  "anthropic" | "ollama" | nil (uses binary default)
----@field model string?     model name override, or nil to use binary default
----@field context string?   extra context passed via --context
----@field virtual_text boolean|string  false to disable, or highlight group name
----@field virtual_text_msg string      text shown while generating
----@field keymap string?   normal-mode key to re-trigger in gitcommit buffers (nil = off)
+-- ── Config ────────────────────────────────────────────────────────────────────
 
----@type GitCommitAIConfig
+---@class GitCommitAIConfig
+---@field bin string        binary name or path; must be on PATH if a bare name
+---@field provider string?  "anthropic"|"ollama"|nil (binary default)
+---@field model string?     model override, or nil for binary default
+---@field context string?   passed via --context
+---@field virtual_text boolean|string  false=off, true/"HLGroup"=highlight group
+---@field keymap string?   normal-mode re-trigger key in gitcommit buffers
+
 local defaults = {
   bin = "git-commit",
   provider = nil,
   model = nil,
   context = nil,
   virtual_text = "Comment",
-  virtual_text_msg = "  generating…",
   keymap = "<leader>gc",
 }
 
+local cfg = {} ---@type GitCommitAIConfig
+
+-- ── Namespace + spinner frames ────────────────────────────────────────────────
+
 local ns = vim.api.nvim_create_namespace("git_commit_ai")
+local SPIN = { "|", "/", "-", "\\" }
 
--- per-buffer state
-local jobs = {}   ---@type table<integer, integer>   bufnr -> job_id
-local marks = {}  ---@type table<integer, integer>   bufnr -> extmark_id
+-- ── Fake LSP client shim ──────────────────────────────────────────────────────
+-- Noice's $/progress handler calls vim.lsp.get_client_by_id and silently drops
+-- events for unknown clients. We monkey-patch it with a sentinel, then restore.
 
-local cfg = {}  ---@type GitCommitAIConfig
+local FAKE_ID = -999
+local _orig_get_client = nil
+local _client_refs = 0
 
--- cancel any running job and remove the indicator extmark for bufnr
-local function cancel(bufnr)
-  if jobs[bufnr] then
-    vim.fn.jobstop(jobs[bufnr])
-    jobs[bufnr] = nil
+local function acquire_fake_client()
+  if _client_refs == 0 then
+    _orig_get_client = vim.lsp.get_client_by_id
+    vim.lsp.get_client_by_id = function(id)
+      if id == FAKE_ID then
+        return { id = FAKE_ID, name = "git-commit-ai" }
+      end
+      return _orig_get_client(id)
+    end
   end
-  if marks[bufnr] then
-    pcall(vim.api.nvim_buf_del_extmark, bufnr, ns, marks[bufnr])
-    marks[bufnr] = nil
-  end
-  pcall(vim.api.nvim_del_augroup_by_name, "GitCommitAIAbort" .. bufnr)
+  _client_refs = _client_refs + 1
 end
 
--- true when there is already non-comment, non-empty content at the top of the buffer
+local function release_fake_client()
+  _client_refs = _client_refs - 1
+  if _client_refs == 0 and _orig_get_client then
+    -- Noice defers its "end" close by 100 ms; let that fire before we restore.
+    vim.defer_fn(function()
+      if _client_refs == 0 then
+        vim.lsp.get_client_by_id = _orig_get_client
+        _orig_get_client = nil
+      end
+    end, 200)
+  end
+end
+
+local function emit_progress(kind, token, title, message)
+  pcall(vim.api.nvim_exec_autocmds, "LspProgress", {
+    pattern = tostring(FAKE_ID) .. "/" .. kind .. "/" .. tostring(token),
+    data = {
+      client_id = FAKE_ID,
+      result = {
+        token = token,
+        value = { kind = kind, title = title, message = message },
+      },
+    },
+  })
+end
+
+-- ── Per-buffer state ──────────────────────────────────────────────────────────
+
+local jobs   = {} ---@type table<integer, integer>
+local marks  = {} ---@type table<integer, integer>
+local timers = {} ---@type table<integer, uv_timer_t>
+local tokens = {} ---@type table<integer, string>
+local gens   = {} ---@type table<integer, integer>
+
+-- ── Helpers ───────────────────────────────────────────────────────────────────
+
+local function virt_hl()
+  local v = cfg.virtual_text
+  if not v then return nil end
+  return type(v) == "string" and v or "Comment"
+end
+
 local function has_user_content(lines)
   for _, l in ipairs(lines) do
     if l:match("^#") then break end
@@ -50,107 +97,245 @@ local function has_user_content(lines)
   return false
 end
 
-local function insert_message(bufnr, message)
+local function insert_message(bufnr, subject, body_lines)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   if has_user_content(lines) then return end
 
-  -- find where the git comment block starts
   local first_comment = #lines + 1
   for i, l in ipairs(lines) do
-    if l:match("^#") then
-      first_comment = i
-      break
-    end
+    if l:match("^#") then first_comment = i; break end
   end
 
-  local msg = vim.split(vim.trim(message), "\n")
-  -- assemble: [message lines] [blank separator] [original comment lines]
-  local new = {}
-  vim.list_extend(new, msg)
+  local new = { subject, "" }
+  vim.list_extend(new, body_lines)
   new[#new + 1] = ""
-  for i = first_comment, #lines do
-    new[#new + 1] = lines[i]
-  end
+  for i = first_comment, #lines do new[#new + 1] = lines[i] end
 
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, new)
-
   local winid = vim.fn.bufwinid(bufnr)
   if winid ~= -1 then
-    pcall(vim.api.nvim_win_set_cursor, winid, { 1, #msg[1] })
+    pcall(vim.api.nvim_win_set_cursor, winid, { 1, #subject })
   end
 end
 
---- Kick off AI generation for bufnr. Called automatically on FileType gitcommit
---- and can be called manually (e.g. from a keymap).
----@param bufnr integer?
+local function clear(bufnr)
+  if jobs[bufnr] then
+    vim.fn.jobstop(jobs[bufnr])
+    jobs[bufnr] = nil
+  end
+  if timers[bufnr] then
+    timers[bufnr]:stop()
+    timers[bufnr] = nil
+  end
+  if marks[bufnr] then
+    pcall(vim.api.nvim_buf_del_extmark, bufnr, ns, marks[bufnr])
+    marks[bufnr] = nil
+  end
+  if tokens[bufnr] then
+    emit_progress("end", tokens[bufnr], "git-commit-ai", nil)
+    tokens[bufnr] = nil
+    release_fake_client()
+  end
+  gens[bufnr] = (gens[bufnr] or 0) + 1
+  pcall(vim.api.nvim_del_augroup_by_name, "GitCommitAIAbort" .. bufnr)
+end
+
+-- ── Line accumulator ──────────────────────────────────────────────────────────
+-- jobstart with buffered=false delivers chunks that may span line boundaries.
+-- Accumulate in a single-element table (acts as a mutable string ref) and
+-- extract complete lines on each call.
+
+local function make_feeder(handler)
+  local raw = { "" }
+  local function feed(data)
+    raw[1] = raw[1] .. table.concat(data, "\n")
+    local ls = vim.split(raw[1], "\n")
+    raw[1] = table.remove(ls) -- keep last (possibly partial) line
+    for _, l in ipairs(ls) do handler(l) end
+  end
+  return feed, raw -- raw exposed so spinner can read the partial
+end
+
+-- ── Generator ─────────────────────────────────────────────────────────────────
+
 function M.generate(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
-  cancel(bufnr)
 
-  local hl = type(cfg.virtual_text) == "string" and cfg.virtual_text
-    or (cfg.virtual_text and "Comment" or nil)
+  clear(bufnr) -- stops previous job and closes its Noice progress
 
+  local token = "gca-" .. bufnr
+  local my_gen = (gens[bufnr] or 0) + 1
+  gens[bufnr] = my_gen
+
+  acquire_fake_client()
+  tokens[bufnr] = token
+  emit_progress("begin", token, "git-commit-ai", "starting…")
+
+  local hl = virt_hl()
   if hl then
     marks[bufnr] = vim.api.nvim_buf_set_extmark(bufnr, ns, 0, 0, {
-      virt_text = { { cfg.virtual_text_msg, hl } },
+      virt_text = { { "  | generating…", hl } },
       virt_text_pos = "eol",
     })
   end
 
-  local cmd = { cfg.bin, "--dry-run" }
-  if cfg.provider then vim.list_extend(cmd, { "--provider", cfg.provider }) end
-  if cfg.model then vim.list_extend(cmd, { "--model", cfg.model }) end
-  if cfg.context then vim.list_extend(cmd, { "--context", cfg.context }) end
+  -- Per-job closure state
+  local j_body = {}      -- streamed body lines ("- path: summary")
+  local j_subject = nil  -- subject line (last non-bullet stdout line)
+  local j_total = 0      -- total file count from stderr
+  local j_done = 0       -- files summarised so far
 
-  -- register abort listeners: any text change cancels in-flight generation
+  -- Stdout: body lines streamed one-per-file, subject line last.
+  local function on_stdout_line(line)
+    if line == "" then return end
+    if line:match("^%- ") then
+      j_body[#j_body + 1] = line
+    else
+      j_subject = line
+    end
+  end
+
+  -- Stderr: drives Noice progress messages with file counts and names.
+  local function on_stderr_line(line)
+    if line == "" then return end
+
+    local n = line:match("^summarizing (%d+) file")
+    if n then
+      j_total = tonumber(n) or 0
+      vim.schedule(function()
+        emit_progress("report", token, "git-commit-ai",
+          ("0/%d files"):format(j_total))
+      end)
+      return
+    end
+
+    local path_done = line:match("^  (.-)… .+$")
+    if path_done then
+      j_done = j_done + 1
+      vim.schedule(function()
+        emit_progress("report", token, "git-commit-ai",
+          ("%d/%d %s"):format(j_done, j_total, path_done))
+      end)
+      return
+    end
+
+    if line:match("^generating subject") then
+      vim.schedule(function()
+        emit_progress("report", token, "git-commit-ai", "generating subject…")
+      end)
+    end
+  end
+
+  local feed_stdout, _stdout_raw = make_feeder(on_stdout_line)
+  local feed_stderr, stderr_raw = make_feeder(on_stderr_line)
+
+  -- ASCII spinner in virtual text. Reads `stderr_raw[1]` to detect which file
+  -- is being processed even before its stderr line ends (eprint! partial).
+  local spin_idx = 0
+  local t = vim.uv.new_timer()
+  timers[bufnr] = t
+  t:start(0, 80, vim.schedule_wrap(function()
+    if not hl or not marks[bufnr] or not vim.api.nvim_buf_is_valid(bufnr) then
+      t:stop()
+      return
+    end
+    spin_idx = (spin_idx % #SPIN) + 1
+    local spin = SPIN[spin_idx]
+
+    -- Partial stderr line → file currently being summarised by the LLM
+    local inflight = stderr_raw[1]:match("^  (.-)…") -- "  path…" (no newline yet)
+    local status = inflight and (spin .. " " .. inflight .. "…")
+      or (spin .. " generating…")
+
+    local vl = {}
+    for _, l in ipairs(j_body) do
+      vl[#vl + 1] = { { "  " .. l, hl } }
+    end
+
+    pcall(vim.api.nvim_buf_set_extmark, bufnr, ns, 0, 0, {
+      id = marks[bufnr],
+      virt_text = { { "  " .. status, hl } },
+      virt_text_pos = "eol",
+      virt_lines = vl,
+      virt_lines_above = false,
+    })
+  end))
+
+  -- Abort on any user edit while generating
   local abort_group = "GitCommitAIAbort" .. bufnr
   vim.api.nvim_create_augroup(abort_group, { clear = true })
   vim.api.nvim_create_autocmd({ "InsertCharPre", "TextChanged" }, {
     group = abort_group,
     buffer = bufnr,
     once = true,
-    callback = function() cancel(bufnr) end,
+    -- Defer to avoid destroying the augroup from inside its own callback.
+    callback = function() vim.schedule(function() clear(bufnr) end) end,
   })
 
-  local out = {}
-  local err = {}
+  local cmd = { cfg.bin, "--dry-run" }
+  if cfg.provider then vim.list_extend(cmd, { "--provider", cfg.provider }) end
+  if cfg.model then vim.list_extend(cmd, { "--model", cfg.model }) end
+  if cfg.context then vim.list_extend(cmd, { "--context", cfg.context }) end
 
-  local job = vim.fn.jobstart(cmd, {
-    stdout_buffered = true,
-    stderr_buffered = true,
-    on_stdout = function(_, data) out = data end,
-    on_stderr = function(_, data) err = data end,
-    on_exit = function(_, code)
-      jobs[bufnr] = nil
-      pcall(vim.api.nvim_buf_del_extmark, bufnr, ns, marks[bufnr])
-      marks[bufnr] = nil
-      pcall(vim.api.nvim_del_augroup_by_name, abort_group)
+  local j_err = {} -- all stderr lines for error reporting
 
-      if code ~= 0 then
-        local msg = table.concat(
-          vim.tbl_filter(function(l) return l ~= "" end, err),
-          "\n"
-        )
-        if msg ~= "" then
-          vim.schedule(function()
-            vim.notify("git-commit-ai: " .. msg, vim.log.levels.WARN)
-          end)
+  local my_job
+  my_job = vim.fn.jobstart(cmd, {
+    stdout_buffered = false,
+    stderr_buffered = false,
+
+    on_stdout = function(_, data)
+      if data then feed_stdout(data) end
+    end,
+
+    on_stderr = function(_, data)
+      if data then
+        -- Capture all stderr for potential error display
+        for _, l in ipairs(data) do
+          if l ~= "" then j_err[#j_err + 1] = l end
         end
-        return
+        feed_stderr(data)
       end
+    end,
 
-      -- jobstart appends a trailing "" entry; strip it
-      while #out > 0 and out[#out] == "" do out[#out] = nil end
-      local message = table.concat(out, "\n")
-      if message == "" then return end
+    on_exit = function(_, code)
+      if gens[bufnr] ~= my_gen then return end -- cancelled / superseded
 
-      vim.schedule(function() insert_message(bufnr, message) end)
+      -- Flush any partial line remaining in each accumulator
+      if _stdout_raw[1] ~= "" then on_stdout_line(_stdout_raw[1]) end
+      if stderr_raw[1] ~= "" then on_stderr_line(stderr_raw[1]) end
+
+      vim.schedule(function()
+        if gens[bufnr] ~= my_gen then return end
+
+        jobs[bufnr] = nil
+        if timers[bufnr] then timers[bufnr]:stop(); timers[bufnr] = nil end
+        pcall(vim.api.nvim_buf_del_extmark, bufnr, ns, marks[bufnr])
+        marks[bufnr] = nil
+        pcall(vim.api.nvim_del_augroup_by_name, abort_group)
+
+        emit_progress("end", token, "git-commit-ai", nil)
+        tokens[bufnr] = nil
+        vim.defer_fn(release_fake_client, 200)
+
+        if code ~= 0 then
+          local msg = table.concat(j_err, "\n")
+          if msg ~= "" then
+            vim.notify("git-commit-ai: " .. msg, vim.log.levels.WARN)
+          end
+          return
+        end
+
+        if j_subject and j_subject ~= "" then
+          insert_message(bufnr, j_subject, j_body)
+        end
+      end)
     end,
   })
 
-  if job <= 0 then
-    cancel(bufnr)
+  if my_job <= 0 then
+    clear(bufnr)
     vim.notify(
       ("git-commit-ai: could not start '%s' — is it in PATH?"):format(cfg.bin),
       vim.log.levels.ERROR
@@ -158,11 +343,11 @@ function M.generate(bufnr)
     return
   end
 
-  jobs[bufnr] = job
+  jobs[bufnr] = my_job
 end
 
---- Configure and activate the plugin.
----@param opts GitCommitAIConfig?
+-- ── Setup ─────────────────────────────────────────────────────────────────────
+
 function M.setup(opts)
   cfg = vim.tbl_deep_extend("force", defaults, opts or {})
 
@@ -173,8 +358,6 @@ function M.setup(opts)
     pattern = "gitcommit",
     callback = function(ev)
       local bufnr = ev.buf
-
-      -- skip if the commit was pre-populated (--fixup, -m, amend with content, etc.)
       if has_user_content(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) then
         return
       end
@@ -191,7 +374,7 @@ function M.setup(opts)
         group = group,
         buffer = bufnr,
         once = true,
-        callback = function() cancel(bufnr) end,
+        callback = function() clear(bufnr) end,
       })
     end,
   })
