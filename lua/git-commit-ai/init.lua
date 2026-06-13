@@ -21,10 +21,9 @@ local defaults = {
 
 local cfg = {} ---@type GitCommitAIConfig
 
--- ── Namespace + spinner frames ────────────────────────────────────────────────
+-- ── Namespace ─────────────────────────────────────────────────────────────────
 
 local ns = vim.api.nvim_create_namespace("git_commit_ai")
-local SPIN = { "|", "/", "-", "\\" }
 
 -- ── Fake LSP client shim ──────────────────────────────────────────────────────
 -- Noice's $/progress handler calls vim.lsp.get_client_by_id and silently drops
@@ -77,7 +76,6 @@ end
 
 local jobs   = {} ---@type table<integer, integer>
 local marks  = {} ---@type table<integer, integer>
-local timers = {} ---@type table<integer, uv_timer_t>
 local tokens = {} ---@type table<integer, string>
 local gens   = {} ---@type table<integer, integer>
 
@@ -123,10 +121,6 @@ local function clear(bufnr)
   if jobs[bufnr] then
     vim.fn.jobstop(jobs[bufnr])
     jobs[bufnr] = nil
-  end
-  if timers[bufnr] then
-    timers[bufnr]:stop()
-    timers[bufnr] = nil
   end
   if marks[bufnr] then
     pcall(vim.api.nvim_buf_del_extmark, bufnr, ns, marks[bufnr])
@@ -175,7 +169,7 @@ function M.generate(bufnr)
   local hl = virt_hl()
   if hl then
     marks[bufnr] = vim.api.nvim_buf_set_extmark(bufnr, ns, 0, 0, {
-      virt_text = { { "  | generating…", hl } },
+      virt_text = { { "  generating commit message... type your own to cancel.", hl } },
       virt_text_pos = "eol",
     })
   end
@@ -228,39 +222,7 @@ function M.generate(bufnr)
   end
 
   local feed_stdout, _stdout_raw = make_feeder(on_stdout_line)
-  local feed_stderr, stderr_raw = make_feeder(on_stderr_line)
-
-  -- ASCII spinner in virtual text. Reads `stderr_raw[1]` to detect which file
-  -- is being processed even before its stderr line ends (eprint! partial).
-  local spin_idx = 0
-  local t = vim.uv.new_timer()
-  timers[bufnr] = t
-  t:start(0, 80, vim.schedule_wrap(function()
-    if not hl or not marks[bufnr] or not vim.api.nvim_buf_is_valid(bufnr) then
-      t:stop()
-      return
-    end
-    spin_idx = (spin_idx % #SPIN) + 1
-    local spin = SPIN[spin_idx]
-
-    -- Partial stderr line → file currently being summarised by the LLM
-    local inflight = stderr_raw[1]:match("^  (.-)…") -- "  path…" (no newline yet)
-    local status = inflight and (spin .. " " .. inflight .. "…")
-      or (spin .. " generating…")
-
-    local vl = {}
-    for _, l in ipairs(j_body) do
-      vl[#vl + 1] = { { "  " .. l, hl } }
-    end
-
-    pcall(vim.api.nvim_buf_set_extmark, bufnr, ns, 0, 0, {
-      id = marks[bufnr],
-      virt_text = { { "  " .. status, hl } },
-      virt_text_pos = "eol",
-      virt_lines = vl,
-      virt_lines_above = false,
-    })
-  end))
+  local feed_stderr, _stderr_raw = make_feeder(on_stderr_line)
 
   -- Abort on any user edit while generating
   local abort_group = "GitCommitAIAbort" .. bufnr
@@ -304,13 +266,12 @@ function M.generate(bufnr)
 
       -- Flush any partial line remaining in each accumulator
       if _stdout_raw[1] ~= "" then on_stdout_line(_stdout_raw[1]) end
-      if stderr_raw[1] ~= "" then on_stderr_line(stderr_raw[1]) end
+      if _stderr_raw[1] ~= "" then on_stderr_line(_stderr_raw[1]) end
 
       vim.schedule(function()
         if gens[bufnr] ~= my_gen then return end
 
         jobs[bufnr] = nil
-        if timers[bufnr] then timers[bufnr]:stop(); timers[bufnr] = nil end
         pcall(vim.api.nvim_buf_del_extmark, bufnr, ns, marks[bufnr])
         marks[bufnr] = nil
         pcall(vim.api.nvim_del_augroup_by_name, abort_group)
