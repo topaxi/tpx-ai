@@ -218,6 +218,13 @@ function M.generate(bufnr)
       return
     end
 
+    if line:match("^consolidating") then
+      vim.schedule(function()
+        emit_progress("report", token, "git-commit-ai", "consolidating…")
+      end)
+      return
+    end
+
     if line:match("^generating subject") then
       vim.schedule(function()
         emit_progress("report", token, "git-commit-ai", "generating subject…")

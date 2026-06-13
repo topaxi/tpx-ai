@@ -115,34 +115,38 @@ async fn main() -> Result<()> {
         bail!("all changed files are excluded from diff analysis");
     }
 
-    // Dry-run: stream body lines to stdout as each file completes, subject last.
-    // The plugin reads these progressively to update virtual text.
+    let file_paths: Vec<&str> = file_diffs.iter().map(|(p, _)| p.as_str()).collect();
+
+    // Dry-run: all output goes to stdout at the end (body bullets then subject).
+    // The plugin collects "- …" lines as body and the last plain line as subject.
     if cli.dry_run {
         eprintln!("summarizing {} file(s)…", file_diffs.len());
-        let mut summaries = Vec::with_capacity(file_diffs.len());
+        let mut file_summaries = Vec::with_capacity(file_diffs.len());
         for (path, content) in &file_diffs {
             eprint!("  {path}…");
             let summary = summarize_file_diff(path, content, &provider)
                 .await
                 .with_context(|| format!("failed to summarize {path}"))?;
             eprintln!(" {summary}");
-            summaries.push(format!("{path}: {summary}"));
-            println!("- {path}: {summary}");
-            std::io::stdout().flush().ok();
+            file_summaries.push(format!("{path}: {summary}"));
         }
+        eprintln!("consolidating changes…");
+        let bullets = consolidate_changes(&file_summaries, &provider).await?;
+        for b in &bullets {
+            println!("- {b}");
+        }
+        std::io::stdout().flush().ok();
         eprintln!("generating subject…");
-        let subject = generate_subject(&summaries, cli.context.as_deref(), format, cfg.commit_prompt_extra.as_deref(), branch.as_deref(), &provider).await?;
+        let subject = generate_subject(&bullets, &file_paths, cli.context.as_deref(), format, cfg.commit_prompt_extra.as_deref(), branch.as_deref(), &provider).await?;
         println!("{}", subject.trim());
         return Ok(());
     }
 
-    let summaries = summarize_all(&file_diffs, &provider).await?;
-    let subject = generate_subject(&summaries, cli.context.as_deref(), format, cfg.commit_prompt_extra.as_deref(), branch.as_deref(), &provider).await?;
-    let body = summaries
-        .iter()
-        .map(|s| format!("- {s}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let file_summaries = summarize_all(&file_diffs, &provider).await?;
+    eprintln!("consolidating changes…");
+    let bullets = consolidate_changes(&file_summaries, &provider).await?;
+    let subject = generate_subject(&bullets, &file_paths, cli.context.as_deref(), format, cfg.commit_prompt_extra.as_deref(), branch.as_deref(), &provider).await?;
+    let body = bullets.iter().map(|b| format!("- {b}")).collect::<Vec<_>>().join("\n");
     let message = format!("{}\n\n{}", subject.trim(), body).trim().to_string();
 
     run_commit(&message)?;
@@ -304,23 +308,36 @@ async fn summarize_all(
     Ok(summaries)
 }
 
+/// Truncate a diff to `limit` bytes, preferring a clean hunk boundary (`\n@@`).
+/// Falls back to the last newline within the limit when no prior complete hunk exists.
+fn truncate_diff(diff: &str, limit: usize) -> &str {
+    if diff.len() <= limit {
+        return diff;
+    }
+    let within = &diff[..limit];
+    // Find the last hunk header inside the limit and truncate before it,
+    // but only when at least one earlier hunk exists (so we keep some content).
+    if let Some(pos) = within.rfind("\n@@") {
+        if within[..pos].contains("\n@@") {
+            return &diff[..pos];
+        }
+    }
+    // Fall back: cut at the last newline.
+    let cut = within.rfind('\n').unwrap_or(limit);
+    &diff[..cut]
+}
+
 async fn summarize_file_diff(path: &str, diff: &str, provider: &LlmProvider) -> Result<String> {
-    let diff = if diff.len() > MAX_FILE_DIFF_BYTES {
-        let cut = diff[..MAX_FILE_DIFF_BYTES]
-            .rfind('\n')
-            .unwrap_or(MAX_FILE_DIFF_BYTES);
-        &diff[..cut]
-    } else {
-        diff
-    };
+    let diff = truncate_diff(diff, MAX_FILE_DIFF_BYTES);
 
     let messages = vec![
         Message::system(
-            "Summarize this code change in one concise, technical sentence. \
+            "Summarize what this code change does in one concise sentence. \
+             Focus on what behaviour or functionality changes, not which variables or functions were modified. \
              No filler like 'This change' or 'This commit'. \
              Output only the summary.",
         ),
-        Message::user(format!("```diff\n{diff}\n```")),
+        Message::user(format!("File: {path}\n\n```diff\n{diff}\n```")),
     ];
 
     provider
@@ -329,10 +346,62 @@ async fn summarize_file_diff(path: &str, diff: &str, provider: &LlmProvider) -> 
         .with_context(|| format!("failed to summarize {path}"))
 }
 
-/// Ask the model for only the subject line. The body is assembled by the
-/// caller from the per-file summaries, so the model has a much simpler task.
+/// Collapse per-file summaries into a short bullet list of conceptual changes.
+/// For a single file the LLM call is skipped — the summary is used directly.
+async fn consolidate_changes(
+    file_summaries: &[String],
+    provider: &LlmProvider,
+) -> Result<Vec<String>> {
+    if file_summaries.len() == 1 {
+        let text = file_summaries[0]
+            .split_once(": ")
+            .map(|(_, s)| s.to_string())
+            .unwrap_or_else(|| file_summaries[0].clone());
+        return Ok(vec![text]);
+    }
+
+    let input = file_summaries.join("\n");
+    let output = provider
+        .complete(vec![
+            Message::system(
+                "You are given per-file change summaries from a git diff.\n\
+                 Synthesize them into a concise bullet list of what this commit achieves: \
+                 new behaviour, features, fixes, or capabilities introduced.\n\
+                 Group related changes into single bullets. \
+                 Focus on the developer-visible outcome, not which files or functions were modified.\n\
+                 Imperative mood. One bullet per logical change. Prefix each with \"- \".\n\
+                 Output only the bullet list, nothing else.",
+            ),
+            Message::user(input),
+        ])
+        .await
+        .context("failed to consolidate changes")?;
+
+    let bullets: Vec<String> = output
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("- ")
+                .or_else(|| l.strip_prefix("* "))
+                .map(|s| s.to_string())
+        })
+        .collect();
+
+    if bullets.is_empty() {
+        // Fallback: strip file paths from the raw summaries
+        Ok(file_summaries
+            .iter()
+            .map(|s| s.split_once(": ").map(|(_, v)| v.to_string()).unwrap_or_else(|| s.clone()))
+            .collect())
+    } else {
+        Ok(bullets)
+    }
+}
+
+/// Generate the subject line from consolidated bullets.
 async fn generate_subject(
-    summaries: &[String],
+    bullets: &[String],
+    file_paths: &[&str],
     context: Option<&str>,
     format: CommitFormat,
     prompt_extra: Option<&str>,
@@ -346,7 +415,7 @@ Rules: imperative mood, ≤72 characters, no period at the end.
 Output only the subject line — nothing else, no explanation.",
         CommitFormat::Scoped => "\
 Write a single git commit subject line as: <scope>: <description>.
-Derive the scope from the changed paths (subsystem, package, tool name, path prefix — whatever best identifies the area).
+Infer the scope from the affected files and the nature of the changes (subsystem, tool, component, or module name).
 Examples: \"git-commit: add dry-run flag\", \"net/http: fix redirect loop\", \"gitlab-ci: update image\"
 Rules: imperative mood, ≤72 characters, no period at the end. No type prefix (feat/fix/etc).
 Output only the subject line — nothing else, no explanation.",
@@ -356,7 +425,6 @@ Output only the subject line — nothing else, no explanation.",
         None => base.to_string(),
     };
 
-    let changes = summaries.join("\n");
     let mut parts: Vec<String> = Vec::new();
     if let Some(b) = branch {
         parts.push(format!("Branch: {b}"));
@@ -364,7 +432,10 @@ Output only the subject line — nothing else, no explanation.",
     if let Some(ctx) = context {
         parts.push(format!("Context: {ctx}"));
     }
-    parts.push(format!("Changes:\n{changes}"));
+    if !file_paths.is_empty() {
+        parts.push(format!("Affected files:\n{}", file_paths.join("\n")));
+    }
+    parts.push(format!("Changes:\n{}", bullets.iter().map(|b| format!("- {b}")).collect::<Vec<_>>().join("\n")));
     let user = parts.join("\n\n");
 
     let subject = provider
@@ -372,7 +443,6 @@ Output only the subject line — nothing else, no explanation.",
         .await
         .context("failed to generate commit subject")?;
 
-    // Strip any stray newlines the model may have added
     Ok(subject.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string())
 }
 
