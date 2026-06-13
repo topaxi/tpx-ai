@@ -82,6 +82,42 @@ AGENT_ID=$(ant beta:agents create < agents/my-agent.agent.yaml --transform id -r
 ant beta:agents update --agent-id "$AGENT_ID" --version N < agents/my-agent.agent.yaml
 ```
 
+## Neovim Plugin
+
+`lua/git-commit-ai/` is a Neovim plugin that hooks into `gitcommit` buffers to
+auto-fill commit messages via the `git-commit` binary's `--dry-run` flag.
+
+Install the binary first:
+```sh
+cargo build --release
+# or: cargo install --path tools/git-commit
+```
+
+Add to your Neovim config (lazy.nvim example):
+```lua
+{
+  dir = "~/projects/tpx-ai",
+  name = "git-commit-ai",
+  ft = "gitcommit",
+  config = function()
+    require("git-commit-ai").setup({
+      bin      = vim.fn.expand("~/projects/tpx-ai/target/release/git-commit"),
+      provider = "ollama",   -- or "anthropic"
+      -- model = "gemma4:12b",
+      -- keymap = "<leader>gc",          -- re-trigger in normal mode
+      -- virtual_text = "Comment",       -- false to disable, or highlight group
+      -- virtual_text_msg = "  generating…",
+    })
+  end,
+}
+```
+
+Behaviour:
+- Triggers automatically when a `gitcommit` buffer opens with no existing content.
+- Any keystroke while generating cancels the job.
+- `keymap` (default `<leader>gc`) re-triggers generation at any time.
+- Does nothing if the buffer already has content (`--fixup`, amend, `-m`, etc.).
+
 ## Common Commands
 
 ```sh
