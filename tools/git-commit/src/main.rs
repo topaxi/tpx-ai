@@ -2,7 +2,7 @@ mod config;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use config::Config;
+use config::{CommitFormat, Config};
 use llm::{LlmProvider, Message};
 use std::io::Write as _;
 use std::process::Command;
@@ -47,6 +47,11 @@ struct Cli {
     #[arg(long, env = "OLLAMA_HOST")]
     ollama_url: Option<String>,
 
+    /// Commit message format: "conventional" (type(scope): desc) or "scoped" (scope: desc)
+    /// [env: GIT_COMMIT_FORMAT] [config: commit.format]
+    #[arg(long)]
+    commit_format: Option<String>,
+
     /// Print the generated commit message without committing
     #[arg(long)]
     dry_run: bool,
@@ -72,6 +77,16 @@ async fn main() -> Result<()> {
     }
 
     let cfg = Config::load();
+
+    // Priority: --commit-format > project config > global config > default
+    let format = cli
+        .commit_format
+        .as_deref()
+        .map(|s| s.parse::<CommitFormat>().map_err(|e| anyhow::anyhow!(e)))
+        .transpose()?
+        .or(cfg.commit_format)
+        .unwrap_or_default();
+
     let provider = build_provider(&cli, &cfg).await?;
     let file_diffs = split_into_file_diffs(&diff);
     if file_diffs.is_empty() {
@@ -94,13 +109,13 @@ async fn main() -> Result<()> {
             std::io::stdout().flush().ok();
         }
         eprintln!("generating subject…");
-        let subject = generate_subject(&summaries, cli.context.as_deref(), &provider).await?;
+        let subject = generate_subject(&summaries, cli.context.as_deref(), format, &provider).await?;
         println!("{}", subject.trim());
         return Ok(());
     }
 
     let summaries = summarize_all(&file_diffs, &provider).await?;
-    let subject = generate_subject(&summaries, cli.context.as_deref(), &provider).await?;
+    let subject = generate_subject(&summaries, cli.context.as_deref(), format, &provider).await?;
     let body = summaries
         .iter()
         .map(|s| format!("- {s}"))
@@ -234,12 +249,20 @@ async fn summarize_file_diff(path: &str, diff: &str, provider: &LlmProvider) -> 
 async fn generate_subject(
     summaries: &[String],
     context: Option<&str>,
+    format: CommitFormat,
     provider: &LlmProvider,
 ) -> Result<String> {
-    let system = "\
+    let system = match format {
+        CommitFormat::Conventional => "\
 Write a single git commit subject line in conventional commit format: type(scope): description.
 Rules: imperative mood, ≤72 characters, no period at the end.
-Output only the subject line — nothing else, no explanation.";
+Output only the subject line — nothing else, no explanation.",
+        CommitFormat::Scoped => "\
+Write a single git commit subject line as: scope: description.
+The scope identifies what area of the codebase changed (subsystem, package, component, path prefix).
+Rules: imperative mood, ≤72 characters, no period at the end. No type prefix (feat/fix/etc).
+Output only the subject line — nothing else, no explanation.",
+    };
 
     let changes = summaries.join("\n");
     let user = match context {
