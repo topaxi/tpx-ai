@@ -71,21 +71,21 @@ async fn main() -> Result<()> {
     }
 
     let cfg = Config::load();
-    let provider = build_provider(&cli, &cfg)?;
+    let provider = build_provider(&cli, &cfg).await?;
     let file_diffs = split_into_file_diffs(&diff);
     if file_diffs.is_empty() {
         bail!("failed to parse any file diffs — this is a bug");
     }
 
-    let message = if file_diffs.len() == 1 && file_diffs[0].1.len() <= 6_000 {
-        // Single small file: one direct call
-        let msgs = build_direct_messages(&file_diffs[0].1, cli.context.as_deref());
-        provider.complete(msgs).await.context("LLM call failed")?
-    } else {
-        // Multiple files or large diff: summarize each file, then synthesize
-        let summaries = summarize_all(&file_diffs, &provider).await?;
-        generate_from_summaries(&summaries, cli.context.as_deref(), &provider).await?
-    };
+    let summaries = summarize_all(&file_diffs, &provider).await?;
+    let subject = generate_subject(&summaries, cli.context.as_deref(), &provider).await?;
+    // summaries are "path: description" — render as "- path: description" bullets
+    let body = summaries
+        .iter()
+        .map(|s| format!("- {s}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let message = format!("{}\n\n{}", subject.trim(), body);
 
     let message = message.trim().to_string();
 
@@ -215,55 +215,38 @@ async fn summarize_file_diff(path: &str, diff: &str, provider: &LlmProvider) -> 
         .with_context(|| format!("failed to summarize {path}"))
 }
 
-async fn generate_from_summaries(
+/// Ask the model for only the subject line. The body is assembled by the
+/// caller from the per-file summaries, so the model has a much simpler task.
+async fn generate_subject(
     summaries: &[String],
     context: Option<&str>,
     provider: &LlmProvider,
 ) -> Result<String> {
     let system = "\
-Write a git commit message in two parts, separated by a blank line:
-
-Line 1 — subject: conventional commit format (type(scope): description).
-  Imperative mood. ≤72 characters. No period at the end.
-
-Line 3+ — body: one bullet point per changed file, formatted as '- <what changed>'.
-  Be concise and technical. Do not repeat the subject.
-
-Output only the commit message. No code fences, no explanation.";
+Write a single git commit subject line in conventional commit format: type(scope): description.
+Rules: imperative mood, ≤72 characters, no period at the end.
+Output only the subject line — nothing else, no explanation.";
 
     let changes = summaries.join("\n");
     let user = match context {
-        Some(ctx) => format!("Context: {ctx}\n\nFile changes:\n{changes}"),
-        None => format!("File changes:\n{changes}"),
+        Some(ctx) => format!("Context: {ctx}\n\nChanges:\n{changes}"),
+        None => format!("Changes:\n{changes}"),
     };
 
-    provider
+    let subject = provider
         .complete(vec![Message::system(system), Message::user(user)])
         .await
-        .context("failed to generate commit message from summaries")
+        .context("failed to generate commit subject")?;
+
+    // Strip any stray newlines the model may have added
+    Ok(subject.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string())
 }
 
-/// Single-file fast path: send the diff directly without a summary step.
-fn build_direct_messages(diff: &str, context: Option<&str>) -> Vec<Message> {
-    let system = "\
-Write a git commit message in two parts, separated by a blank line:
+/// Preferred Ollama models, in order. The first one found on the running
+/// Ollama instance is used when no model is explicitly configured.
+const OLLAMA_MODEL_PREFERENCE: &[&str] = &["qwen3.5:2b", "qwen2.5:1.5b", "qwen3.5:0.8b"];
 
-Line 1 — subject: conventional commit format (type(scope): description).
-  Imperative mood. ≤72 characters. No period at the end.
-
-Line 3+ — body: 1-3 sentences describing what changed and why.
-
-Output only the commit message. No code fences, no explanation.";
-
-    let user = match context {
-        Some(ctx) => format!("Context: {ctx}\n\nDiff:\n```diff\n{diff}\n```"),
-        None => format!("Diff:\n```diff\n{diff}\n```"),
-    };
-
-    vec![Message::system(system), Message::user(user)]
-}
-
-fn build_provider(cli: &Cli, cfg: &Config) -> Result<LlmProvider> {
+async fn build_provider(cli: &Cli, cfg: &Config) -> Result<LlmProvider> {
     match cli.provider.to_lowercase().as_str() {
         "anthropic" | "claude" => {
             let api_key = cli
@@ -281,22 +264,45 @@ fn build_provider(cli: &Cli, cfg: &Config) -> Result<LlmProvider> {
             Ok(LlmProvider::anthropic(api_key, model))
         }
         "ollama" => {
-            // Priority: --model > --ollama-model / OLLAMA_MODEL > config file > default
-            let model = cli
-                .model
-                .as_deref()
-                .or(cli.ollama_model.as_deref())
-                .or(cfg.ollama_model.as_deref())
-                .unwrap_or("qwen3.5:0.8b")
-                .to_string();
             // Priority: --ollama-url / OLLAMA_HOST > config file > default
             let url = cli
                 .ollama_url
                 .as_deref()
                 .or(cfg.ollama_url.as_deref())
-                .unwrap_or("http://localhost:11434");
+                .unwrap_or("http://localhost:11434")
+                .to_string();
+            // Priority: --model > --ollama-model / OLLAMA_MODEL > config file > auto-detect
+            let model = if let Some(m) = cli
+                .model
+                .as_deref()
+                .or(cli.ollama_model.as_deref())
+                .or(cfg.ollama_model.as_deref())
+            {
+                m.to_string()
+            } else {
+                pick_ollama_model(&url).await
+            };
             Ok(LlmProvider::ollama(url, model))
         }
         other => bail!("unknown provider '{other}' — expected 'anthropic' or 'ollama'"),
+    }
+}
+
+/// Query the running Ollama instance and return the highest-preference model
+/// that is available, falling back through `OLLAMA_MODEL_PREFERENCE` in order.
+/// If Ollama is unreachable, returns the first entry in the preference list.
+async fn pick_ollama_model(base_url: &str) -> String {
+    match llm::list_ollama_models(base_url).await {
+        Ok(available) => OLLAMA_MODEL_PREFERENCE
+            .iter()
+            .find(|&&pref| available.iter().any(|a| a.as_str() == pref))
+            .map(|&s| s.to_string())
+            .unwrap_or_else(|| {
+                available
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| OLLAMA_MODEL_PREFERENCE[0].to_string())
+            }),
+        Err(_) => OLLAMA_MODEL_PREFERENCE[0].to_string(),
     }
 }

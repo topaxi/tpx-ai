@@ -37,6 +37,16 @@ struct ResponseMessage {
     content: String,
 }
 
+#[derive(Deserialize)]
+struct TagsResponse {
+    models: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelEntry {
+    name: String,
+}
+
 /// Remove `<think>…</think>` reasoning blocks emitted by thinking models
 /// (e.g. qwen3, deepseek-r1) and return the remaining text trimmed.
 fn strip_thinking(s: &str) -> String {
@@ -51,6 +61,18 @@ fn strip_thinking(s: &str) -> String {
     }
     out.push_str(rest);
     out.trim().to_string()
+}
+
+/// Return the names of all models currently available in the Ollama instance.
+pub async fn list_models(base_url: &str) -> anyhow::Result<Vec<String>> {
+    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+    let resp = Client::new()
+        .get(&url)
+        .send()
+        .await
+        .context("failed to reach Ollama")?;
+    let tags: TagsResponse = resp.json().await.context("failed to parse Ollama model list")?;
+    Ok(tags.models.into_iter().map(|m| m.name).collect())
 }
 
 impl OllamaClient {

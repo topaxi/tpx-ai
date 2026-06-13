@@ -2,7 +2,7 @@ mod anthropic;
 mod ollama;
 
 pub use anthropic::AnthropicClient;
-pub use ollama::OllamaClient;
+pub use ollama::{list_models as list_ollama_models, OllamaClient};
 
 use std::fmt;
 
