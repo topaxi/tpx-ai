@@ -73,6 +73,9 @@ async fn main() -> Result<()> {
     let cfg = Config::load();
     let provider = build_provider(&cli, &cfg)?;
     let file_diffs = split_into_file_diffs(&diff);
+    if file_diffs.is_empty() {
+        bail!("failed to parse any file diffs — this is a bug");
+    }
 
     let message = if file_diffs.len() == 1 && file_diffs[0].1.len() <= 6_000 {
         // Single small file: one direct call
@@ -101,7 +104,7 @@ async fn main() -> Result<()> {
 
 fn staged_diff() -> Result<String> {
     let out = Command::new("git")
-        .args(["diff", "--staged"])
+        .args(["diff", "--staged", "--no-ext-diff"])
         .output()
         .context("failed to run `git diff --staged`")?;
 
@@ -217,15 +220,21 @@ async fn generate_from_summaries(
     context: Option<&str>,
     provider: &LlmProvider,
 ) -> Result<String> {
-    let system = "Write a single conventional git commit message for these changes. \
-        Format: type(scope): description. \
-        Use imperative mood. Keep under 72 characters. \
-        Output only the commit message, nothing else.";
+    let system = "\
+Write a git commit message in two parts, separated by a blank line:
+
+Line 1 — subject: conventional commit format (type(scope): description).
+  Imperative mood. ≤72 characters. No period at the end.
+
+Line 3+ — body: one bullet point per changed file, formatted as '- <what changed>'.
+  Be concise and technical. Do not repeat the subject.
+
+Output only the commit message. No code fences, no explanation.";
 
     let changes = summaries.join("\n");
     let user = match context {
-        Some(ctx) => format!("Context: {ctx}\n\nChanges:\n{changes}"),
-        None => format!("Changes:\n{changes}"),
+        Some(ctx) => format!("Context: {ctx}\n\nFile changes:\n{changes}"),
+        None => format!("File changes:\n{changes}"),
     };
 
     provider
@@ -236,10 +245,15 @@ async fn generate_from_summaries(
 
 /// Single-file fast path: send the diff directly without a summary step.
 fn build_direct_messages(diff: &str, context: Option<&str>) -> Vec<Message> {
-    let system = "You are an expert at writing clear, concise git commit messages. \
-        Follow the conventional commits specification: type(scope): description. \
-        Use imperative mood. Keep the subject line under 72 characters. \
-        Output only the commit message, nothing else.";
+    let system = "\
+Write a git commit message in two parts, separated by a blank line:
+
+Line 1 — subject: conventional commit format (type(scope): description).
+  Imperative mood. ≤72 characters. No period at the end.
+
+Line 3+ — body: 1-3 sentences describing what changed and why.
+
+Output only the commit message. No code fences, no explanation.";
 
     let user = match context {
         Some(ctx) => format!("Context: {ctx}\n\nDiff:\n```diff\n{diff}\n```"),
