@@ -87,6 +87,7 @@ async fn main() -> Result<()> {
         .or(cfg.commit_format)
         .unwrap_or_default();
 
+    let branch = current_branch();
     let provider = build_provider(&cli, &cfg).await?;
     let file_diffs = split_into_file_diffs(&diff);
     if file_diffs.is_empty() {
@@ -109,13 +110,13 @@ async fn main() -> Result<()> {
             std::io::stdout().flush().ok();
         }
         eprintln!("generating subject…");
-        let subject = generate_subject(&summaries, cli.context.as_deref(), format, &provider).await?;
+        let subject = generate_subject(&summaries, cli.context.as_deref(), format, cfg.commit_prompt_extra.as_deref(), branch.as_deref(), &provider).await?;
         println!("{}", subject.trim());
         return Ok(());
     }
 
     let summaries = summarize_all(&file_diffs, &provider).await?;
-    let subject = generate_subject(&summaries, cli.context.as_deref(), format, &provider).await?;
+    let subject = generate_subject(&summaries, cli.context.as_deref(), format, cfg.commit_prompt_extra.as_deref(), branch.as_deref(), &provider).await?;
     let body = summaries
         .iter()
         .map(|s| format!("- {s}"))
@@ -130,6 +131,19 @@ async fn main() -> Result<()> {
 }
 
 // ── git ──────────────────────────────────────────────────────────────────────
+
+fn current_branch() -> Option<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8(out.stdout).ok()?;
+    let branch = branch.trim();
+    (branch != "HEAD").then(|| branch.to_string())
+}
 
 fn staged_diff() -> Result<String> {
     let out = Command::new("git")
@@ -250,9 +264,11 @@ async fn generate_subject(
     summaries: &[String],
     context: Option<&str>,
     format: CommitFormat,
+    prompt_extra: Option<&str>,
+    branch: Option<&str>,
     provider: &LlmProvider,
 ) -> Result<String> {
-    let system = match format {
+    let base = match format {
         CommitFormat::Conventional => "\
 Write a single git commit subject line in conventional commit format: type(scope): description.
 Rules: imperative mood, ≤72 characters, no period at the end.
@@ -264,12 +280,21 @@ Examples: \"git-commit: add dry-run flag\", \"net/http: fix redirect loop\", \"g
 Rules: imperative mood, ≤72 characters, no period at the end. No type prefix (feat/fix/etc).
 Output only the subject line — nothing else, no explanation.",
     };
+    let system = match prompt_extra {
+        Some(extra) => format!("{base}\n{extra}"),
+        None => base.to_string(),
+    };
 
     let changes = summaries.join("\n");
-    let user = match context {
-        Some(ctx) => format!("Context: {ctx}\n\nChanges:\n{changes}"),
-        None => format!("Changes:\n{changes}"),
-    };
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(b) = branch {
+        parts.push(format!("Branch: {b}"));
+    }
+    if let Some(ctx) = context {
+        parts.push(format!("Context: {ctx}"));
+    }
+    parts.push(format!("Changes:\n{changes}"));
+    let user = parts.join("\n\n");
 
     let subject = provider
         .complete(vec![Message::system(system), Message::user(user)])
