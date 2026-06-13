@@ -258,8 +258,9 @@ Write a single git commit subject line in conventional commit format: type(scope
 Rules: imperative mood, ≤72 characters, no period at the end.
 Output only the subject line — nothing else, no explanation.",
         CommitFormat::Scoped => "\
-Write a single git commit subject line as: scope: description.
-The scope identifies what area of the codebase changed (subsystem, package, component, path prefix).
+Write a single git commit subject line as: <scope>: <description>.
+Derive the scope from the changed paths (subsystem, package, tool name, path prefix — whatever best identifies the area).
+Examples: \"git-commit: add dry-run flag\", \"net/http: fix redirect loop\", \"gitlab-ci: update image\"
 Rules: imperative mood, ≤72 characters, no period at the end. No type prefix (feat/fix/etc).
 Output only the subject line — nothing else, no explanation.",
     };
