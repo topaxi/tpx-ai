@@ -15,6 +15,10 @@ struct Request<'a> {
     model: &'a str,
     messages: Vec<ApiMessage>,
     stream: bool,
+    /// Disable extended thinking on models that support it (e.g. qwen3).
+    /// When thinking is on, these models emit content only in the `thinking`
+    /// field and leave `content` empty, producing no usable output.
+    think: bool,
 }
 
 #[derive(Serialize)]
@@ -31,6 +35,22 @@ struct Response {
 #[derive(Deserialize)]
 struct ResponseMessage {
     content: String,
+}
+
+/// Remove `<think>…</think>` reasoning blocks emitted by thinking models
+/// (e.g. qwen3, deepseek-r1) and return the remaining text trimmed.
+fn strip_thinking(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("<think>") {
+        out.push_str(&rest[..start]);
+        rest = match rest[start..].find("</think>") {
+            Some(end) => &rest[start + end + "</think>".len()..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
 
 impl OllamaClient {
@@ -55,6 +75,7 @@ impl OllamaClient {
             model: &self.model,
             messages: api_messages,
             stream: false,
+            think: false,
         };
 
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
@@ -80,6 +101,6 @@ impl OllamaClient {
         let resp: Response = serde_json::from_str(&body)
             .with_context(|| format!("failed to parse Ollama response: {body}"))?;
 
-        Ok(resp.message.content)
+        Ok(strip_thinking(&resp.message.content))
     }
 }

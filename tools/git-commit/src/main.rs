@@ -59,8 +59,13 @@ async fn main() -> Result<()> {
         bail!("no staged changes match the --include patterns");
     }
 
+    let (diff_input, truncated) = truncate_diff(&diff);
+    if truncated {
+        eprintln!("note: diff truncated to {MAX_DIFF_BYTES} bytes for the model");
+    }
+
     let provider = build_provider(&cli)?;
-    let messages = build_messages(&diff, cli.context.as_deref());
+    let messages = build_messages(diff_input, cli.context.as_deref());
 
     let message = provider
         .complete(messages)
@@ -133,6 +138,20 @@ fn matches_any(path: &str, patterns: &[String]) -> bool {
             .map(|p| p.matches(path))
             .unwrap_or_else(|_| path.contains(pat.as_str()))
     })
+}
+
+const MAX_DIFF_BYTES: usize = 12_000;
+
+fn truncate_diff(diff: &str) -> (&str, bool) {
+    if diff.len() <= MAX_DIFF_BYTES {
+        (diff, false)
+    } else {
+        // Try to cut at a line boundary
+        let cut = diff[..MAX_DIFF_BYTES]
+            .rfind('\n')
+            .unwrap_or(MAX_DIFF_BYTES);
+        (&diff[..cut], true)
+    }
 }
 
 fn build_messages(diff: &str, context: Option<&str>) -> Vec<Message> {
