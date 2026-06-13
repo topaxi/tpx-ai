@@ -5,6 +5,7 @@ use clap::Parser;
 use config::{CommitFormat, Config};
 use llm::{LlmProvider, Message};
 use std::io::Write as _;
+use std::path::Path;
 use std::process::Command;
 
 #[derive(Parser)]
@@ -89,9 +90,29 @@ async fn main() -> Result<()> {
 
     let branch = current_branch();
     let provider = build_provider(&cli, &cfg).await?;
-    let file_diffs = split_into_file_diffs(&diff);
-    if file_diffs.is_empty() {
+
+    let all_diffs = split_into_file_diffs(&diff);
+    if all_diffs.is_empty() {
         bail!("failed to parse any file diffs — this is a bug");
+    }
+
+    let excludes: Vec<&str> = DEFAULT_EXCLUDES
+        .iter()
+        .copied()
+        .chain(cfg.commit_exclude.iter().map(String::as_str))
+        .collect();
+
+    let (file_diffs, skipped): (Vec<_>, Vec<_>) = all_diffs
+        .into_iter()
+        .partition(|(path, _)| !is_excluded(path, &excludes));
+
+    if !skipped.is_empty() {
+        let names: Vec<&str> = skipped.iter().map(|(p, _)| p.as_str()).collect();
+        eprintln!("excluding {} file(s): {}", skipped.len(), names.join(", "));
+    }
+
+    if file_diffs.is_empty() {
+        bail!("all changed files are excluded from diff analysis");
     }
 
     // Dry-run: stream body lines to stdout as each file completes, subject last.
@@ -171,6 +192,56 @@ fn run_commit(message: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ── exclude list ─────────────────────────────────────────────────────────────
+
+/// Files excluded from diff analysis by default. Patterns are matched against
+/// both the full repo-relative path and the bare filename. Glob syntax (`*`,
+/// `?`, `[...]`) is supported. Extend via `commit.exclude` in the config.
+const DEFAULT_EXCLUDES: &[&str] = &[
+    // Dependency lock files
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lockb",
+    "Cargo.lock",
+    "Gemfile.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "uv.lock",
+    "composer.lock",
+    "packages.lock.json",
+    "pubspec.lock",
+    "go.sum",
+    "mix.lock",
+    "Podfile.lock",
+    "flake.lock",
+    "gradle.lockfile",
+    ".terraform.lock.hcl",
+    // Minified / bundled assets
+    "*.min.js",
+    "*.min.css",
+    // Source maps
+    "*.map",
+    // Generated protobuf
+    "*.pb.go",
+    "*.pb.ts",
+    "*_pb.ts",
+    "*_pb.js",
+];
+
+fn is_excluded(path: &str, patterns: &[&str]) -> bool {
+    let basename = Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path);
+    patterns.iter().any(|&pat| {
+        glob::Pattern::new(pat)
+            .map(|p| p.matches(basename) || p.matches(path))
+            .unwrap_or_else(|_| basename == pat || path.contains(pat))
+    })
 }
 
 // ── diff parsing ──────────────────────────────────────────────────────────────

@@ -79,6 +79,44 @@ git-commit: add --dry-run flag
 net/http: fix redirect loop
 ```
 
+### `commit.exclude`
+
+A list of glob patterns for files to skip during diff analysis. Matched against
+both the bare filename and the full repo-relative path, so `Cargo.lock` matches
+anywhere in the tree and `src/*.generated.ts` matches only under `src/`.
+
+The following are excluded by default and cannot be removed, only extended:
+
+| Category | Patterns |
+|---|---|
+| npm / yarn / pnpm / bun | `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lockb` |
+| Rust | `Cargo.lock` |
+| Ruby | `Gemfile.lock` |
+| Python | `poetry.lock`, `Pipfile.lock`, `uv.lock` |
+| PHP | `composer.lock` |
+| .NET | `packages.lock.json` |
+| Dart / Flutter | `pubspec.lock` |
+| Go | `go.sum` |
+| Elixir | `mix.lock` |
+| iOS | `Podfile.lock` |
+| Nix | `flake.lock` |
+| Gradle | `gradle.lockfile` |
+| Terraform | `.terraform.lock.hcl` |
+| Minified assets | `*.min.js`, `*.min.css` |
+| Source maps | `*.map` |
+| Generated protobuf | `*.pb.go`, `*.pb.ts`, `*_pb.ts`, `*_pb.js` |
+
+Skipped files are reported on stderr. To add project-specific patterns:
+
+```toml
+[commit]
+exclude = ["**/*.generated.ts", "docs/api/openapi.json"]
+
+[[projects]]
+path = "~/work/myrepo"
+commit.exclude = ["vendor/", "some-big-fixture.json"]
+```
+
 ### `commit.prompt_extra`
 
 Appended to the system prompt verbatim. Useful when a project has naming

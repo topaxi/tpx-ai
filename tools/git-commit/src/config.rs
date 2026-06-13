@@ -41,6 +41,9 @@ pub struct Config {
     pub ollama_url: Option<String>,
     pub commit_format: Option<CommitFormat>,
     pub commit_prompt_extra: Option<String>,
+    /// Extra glob patterns to exclude, on top of the built-in defaults.
+    /// Global and project entries are concatenated (project appended last).
+    pub commit_exclude: Vec<String>,
 }
 
 /// Raw TOML shape for `$XDG_CONFIG_HOME/tpx-ai/config.toml`.
@@ -88,6 +91,7 @@ struct TomlOllama {
 struct TomlCommit {
     format: Option<CommitFormat>,
     prompt_extra: Option<String>,
+    exclude: Option<Vec<String>>,
 }
 
 impl Config {
@@ -117,6 +121,17 @@ impl Config {
             commit_prompt_extra: proj
                 .and_then(|p| p.commit.as_ref()?.prompt_extra.clone())
                 .or_else(|| toml.commit.as_ref()?.prompt_extra.clone()),
+            commit_exclude: toml
+                .commit
+                .as_ref()
+                .and_then(|c| c.exclude.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .chain(
+                    proj.and_then(|p| p.commit.as_ref()?.exclude.clone())
+                        .unwrap_or_default(),
+                )
+                .collect(),
         }
     }
 }
