@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{bail, Context};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -41,8 +43,13 @@ struct ContentBlock {
 
 impl AnthropicClient {
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(300))
+            .build()
+            .expect("failed to build HTTP client");
         Self {
-            client: Client::new(),
+            client,
             api_key: api_key.into(),
             model: model.into(),
         }

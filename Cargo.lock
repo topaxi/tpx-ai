@@ -354,6 +354,7 @@ dependencies = [
  "glob",
  "llm",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
 ]

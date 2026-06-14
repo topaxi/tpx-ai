@@ -8,6 +8,21 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::Command;
 
+fn emit_progress(msg: &str) {
+    println!("{}", serde_json::json!({"kind": "progress", "msg": msg}));
+    let _ = std::io::stdout().flush();
+}
+
+fn emit_body(text: &str) {
+    println!("{}", serde_json::json!({"kind": "body", "text": text}));
+    let _ = std::io::stdout().flush();
+}
+
+fn emit_subject(text: &str) {
+    println!("{}", serde_json::json!({"kind": "subject", "text": text}));
+    let _ = std::io::stdout().flush();
+}
+
 #[derive(Parser)]
 #[command(
     name = "git-commit",
@@ -117,28 +132,27 @@ async fn main() -> Result<()> {
 
     let file_paths: Vec<&str> = file_diffs.iter().map(|(p, _)| p.as_str()).collect();
 
-    // Dry-run: all output goes to stdout at the end (body bullets then subject).
-    // The plugin collects "- …" lines as body and the last plain line as subject.
+    // Dry-run: emit NDJSON events to stdout so the Neovim plugin can parse them
+    // as typed events rather than relying on line-prefix heuristics.
     if cli.dry_run {
-        eprintln!("summarizing {} file(s)…", file_diffs.len());
+        emit_progress(&format!("summarizing {} file(s)…", file_diffs.len()));
         let mut file_summaries = Vec::with_capacity(file_diffs.len());
-        for (path, content) in &file_diffs {
-            eprint!("  {path}…");
+        for (i, (path, content)) in file_diffs.iter().enumerate() {
+            emit_progress(&format!("{}/{} {}…", i, file_diffs.len(), path));
             let summary = summarize_file_diff(path, content, &provider)
                 .await
                 .with_context(|| format!("failed to summarize {path}"))?;
-            eprintln!(" {summary}");
+            emit_progress(&format!("{}/{} {}: {}", i + 1, file_diffs.len(), path, summary));
             file_summaries.push(format!("{path}: {summary}"));
         }
-        eprintln!("consolidating changes…");
+        emit_progress("consolidating changes…");
         let bullets = consolidate_changes(&file_summaries, &provider).await?;
         for b in &bullets {
-            println!("- {b}");
+            emit_body(b);
         }
-        std::io::stdout().flush().ok();
-        eprintln!("generating subject…");
+        emit_progress("generating subject…");
         let subject = generate_subject(&bullets, &file_paths, cli.context.as_deref(), format, cfg.commit_prompt_extra.as_deref(), branch.as_deref(), &provider).await?;
-        println!("{}", subject.trim());
+        emit_subject(subject.trim());
         return Ok(());
     }
 

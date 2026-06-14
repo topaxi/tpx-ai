@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{bail, Context};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -66,7 +68,11 @@ fn strip_thinking(s: &str) -> String {
 /// Return the names of all models currently available in the Ollama instance.
 pub async fn list_models(base_url: &str) -> anyhow::Result<Vec<String>> {
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    let resp = Client::new()
+    let resp = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("failed to build HTTP client")
         .get(&url)
         .send()
         .await
@@ -77,8 +83,13 @@ pub async fn list_models(base_url: &str) -> anyhow::Result<Vec<String>> {
 
 impl OllamaClient {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(300))
+            .build()
+            .expect("failed to build HTTP client");
         Self {
-            client: Client::new(),
+            client,
             base_url: base_url.into(),
             model: model.into(),
         }

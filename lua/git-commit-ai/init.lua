@@ -179,61 +179,31 @@ function M.generate(bufnr)
   end)
 
   -- Per-job closure state
-  local j_body = {}      -- streamed body lines ("- path: summary")
-  local j_subject = nil  -- subject line (last non-bullet stdout line)
-  local j_total = 0      -- total file count from stderr
-  local j_done = 0       -- files summarised so far
+  local j_body = {}      -- collected body lines (formatted "- text")
+  local j_subject = nil  -- subject line
 
-  -- Stdout: body lines streamed one-per-file, subject line last.
+  -- Stdout: NDJSON events, one per line.
+  -- {"kind":"progress","msg":"..."}  — drives Noice progress display
+  -- {"kind":"body","text":"..."}     — appended to commit body
+  -- {"kind":"subject","text":"..."}  — becomes commit subject
   local function on_stdout_line(line)
     if line == "" then return end
-    if line:match("^%- ") then
-      j_body[#j_body + 1] = line
-    else
-      j_subject = line
-    end
-  end
+    local ok, event = pcall(vim.json.decode, line)
+    if not ok or type(event) ~= "table" then return end
 
-  -- Stderr: drives Noice progress messages with file counts and names.
-  local function on_stderr_line(line)
-    if line == "" then return end
-
-    local n = line:match("^summarizing (%d+) file")
-    if n then
-      j_total = tonumber(n) or 0
+    if event.kind == "progress" and type(event.msg) == "string" then
       vim.schedule(function()
-        emit_progress("report", token, "git-commit-ai",
-          ("0/%d files"):format(j_total))
+        emit_progress("report", token, "git-commit-ai", event.msg)
       end)
-      return
-    end
-
-    local path_done = line:match("^  (.-)… .+$")
-    if path_done then
-      j_done = j_done + 1
-      vim.schedule(function()
-        emit_progress("report", token, "git-commit-ai",
-          ("%d/%d %s"):format(j_done, j_total, path_done))
-      end)
-      return
-    end
-
-    if line:match("^consolidating") then
-      vim.schedule(function()
-        emit_progress("report", token, "git-commit-ai", "consolidating…")
-      end)
-      return
-    end
-
-    if line:match("^generating subject") then
-      vim.schedule(function()
-        emit_progress("report", token, "git-commit-ai", "generating subject…")
-      end)
+    elseif event.kind == "body" and type(event.text) == "string" then
+      j_body[#j_body + 1] = "- " .. event.text
+    elseif event.kind == "subject" and type(event.text) == "string" then
+      j_subject = event.text
     end
   end
 
   local feed_stdout, _stdout_raw = make_feeder(on_stdout_line)
-  local feed_stderr, _stderr_raw = make_feeder(on_stderr_line)
+  local j_err = {} -- stderr lines captured for error reporting on non-zero exit
 
   -- Abort on any user edit while generating
   local abort_group = "GitCommitAIAbort" .. bufnr
@@ -251,10 +221,9 @@ function M.generate(bufnr)
   if cfg.model then vim.list_extend(cmd, { "--model", cfg.model }) end
   if cfg.context then vim.list_extend(cmd, { "--context", cfg.context }) end
 
-  local j_err = {} -- all stderr lines for error reporting
-
   local my_job
   my_job = vim.fn.jobstart(cmd, {
+    stdin = "null",
     stdout_buffered = false,
     stderr_buffered = false,
 
@@ -264,20 +233,17 @@ function M.generate(bufnr)
 
     on_stderr = function(_, data)
       if data then
-        -- Capture all stderr for potential error display
         for _, l in ipairs(data) do
           if l ~= "" then j_err[#j_err + 1] = l end
         end
-        feed_stderr(data)
       end
     end,
 
     on_exit = function(_, code)
       if gens[bufnr] ~= my_gen then return end -- cancelled / superseded
 
-      -- Flush any partial line remaining in each accumulator
+      -- Flush any partial line remaining in the stdout accumulator
       if _stdout_raw[1] ~= "" then on_stdout_line(_stdout_raw[1]) end
-      if _stderr_raw[1] ~= "" then on_stderr_line(_stderr_raw[1]) end
 
       vim.schedule(function()
         if gens[bufnr] ~= my_gen then return end
