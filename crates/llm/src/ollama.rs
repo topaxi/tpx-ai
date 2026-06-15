@@ -77,7 +77,10 @@ pub async fn list_models(base_url: &str) -> anyhow::Result<Vec<String>> {
         .send()
         .await
         .context("failed to reach Ollama")?;
-    let tags: TagsResponse = resp.json().await.context("failed to parse Ollama model list")?;
+    let tags: TagsResponse = resp
+        .json()
+        .await
+        .context("failed to parse Ollama model list")?;
     Ok(tags.models.into_iter().map(|m| m.name).collect())
 }
 

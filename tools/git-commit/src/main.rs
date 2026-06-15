@@ -9,7 +9,10 @@ use std::path::Path;
 use std::process::Command;
 
 fn emit_progress(msg: &str, model: &str) {
-    println!("{}", serde_json::json!({"kind": "progress", "msg": msg, "model": model}));
+    println!(
+        "{}",
+        serde_json::json!({"kind": "progress", "msg": msg, "model": model})
+    );
     let _ = std::io::stdout().flush();
 }
 
@@ -136,14 +139,20 @@ async fn main() -> Result<()> {
     // as typed events rather than relying on line-prefix heuristics.
     if cli.dry_run {
         let model = provider.model_name().to_string();
-        emit_progress(&format!("summarizing {} file(s)…", file_diffs.len()), &model);
+        emit_progress(
+            &format!("summarizing {} file(s)…", file_diffs.len()),
+            &model,
+        );
         let mut file_summaries = Vec::with_capacity(file_diffs.len());
         for (i, (path, content)) in file_diffs.iter().enumerate() {
             emit_progress(&format!("{}/{} {}…", i, file_diffs.len(), path), &model);
             let summary = summarize_file_diff(path, content, &provider)
                 .await
                 .with_context(|| format!("failed to summarize {path}"))?;
-            emit_progress(&format!("{}/{} {}: {}", i + 1, file_diffs.len(), path, summary), &model);
+            emit_progress(
+                &format!("{}/{} {}: {}", i + 1, file_diffs.len(), path, summary),
+                &model,
+            );
             file_summaries.push(format!("{path}: {summary}"));
         }
         emit_progress("consolidating changes…", &model);
@@ -152,7 +161,16 @@ async fn main() -> Result<()> {
             emit_body(b);
         }
         emit_progress("generating subject…", &model);
-        let subject = generate_subject(&bullets, &file_paths, cli.context.as_deref(), format, cfg.commit_prompt_extra.as_deref(), branch.as_deref(), &provider).await?;
+        let subject = generate_subject(
+            &bullets,
+            &file_paths,
+            cli.context.as_deref(),
+            format,
+            cfg.commit_prompt_extra.as_deref(),
+            branch.as_deref(),
+            &provider,
+        )
+        .await?;
         emit_subject(subject.trim());
         return Ok(());
     }
@@ -160,8 +178,21 @@ async fn main() -> Result<()> {
     let file_summaries = summarize_all(&file_diffs, &provider).await?;
     eprintln!("consolidating changes…");
     let bullets = consolidate_changes(&file_summaries, &provider).await?;
-    let subject = generate_subject(&bullets, &file_paths, cli.context.as_deref(), format, cfg.commit_prompt_extra.as_deref(), branch.as_deref(), &provider).await?;
-    let body = bullets.iter().map(|b| format!("- {b}")).collect::<Vec<_>>().join("\n");
+    let subject = generate_subject(
+        &bullets,
+        &file_paths,
+        cli.context.as_deref(),
+        format,
+        cfg.commit_prompt_extra.as_deref(),
+        branch.as_deref(),
+        &provider,
+    )
+    .await?;
+    let body = bullets
+        .iter()
+        .map(|b| format!("- {b}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let message = format!("{}\n\n{}", subject.trim(), body).trim().to_string();
 
     run_commit(&message)?;
@@ -406,7 +437,11 @@ async fn consolidate_changes(
         // Fallback: strip file paths from the raw summaries
         Ok(file_summaries
             .iter()
-            .map(|s| s.split_once(": ").map(|(_, v)| v.to_string()).unwrap_or_else(|| s.clone()))
+            .map(|s| {
+                s.split_once(": ")
+                    .map(|(_, v)| v.to_string())
+                    .unwrap_or_else(|| s.clone())
+            })
             .collect())
     } else {
         Ok(bullets)
@@ -450,7 +485,14 @@ Output only the subject line — nothing else, no explanation.",
     if !file_paths.is_empty() {
         parts.push(format!("Affected files:\n{}", file_paths.join("\n")));
     }
-    parts.push(format!("Changes:\n{}", bullets.iter().map(|b| format!("- {b}")).collect::<Vec<_>>().join("\n")));
+    parts.push(format!(
+        "Changes:\n{}",
+        bullets
+            .iter()
+            .map(|b| format!("- {b}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ));
     let user = parts.join("\n\n");
 
     let subject = provider
@@ -458,7 +500,12 @@ Output only the subject line — nothing else, no explanation.",
         .await
         .context("failed to generate commit subject")?;
 
-    Ok(subject.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string())
+    Ok(subject
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string())
 }
 
 /// Preferred Ollama models, in order. The first one found on the running
