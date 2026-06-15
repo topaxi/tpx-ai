@@ -484,13 +484,19 @@ async fn build_provider(cli: &Cli, cfg: &Config) -> Result<LlmProvider> {
                 .clone()
                 .context("ANTHROPIC_API_KEY is not set")?;
             // Priority: --model > --anthropic-model / ANTHROPIC_MODEL > config file > default
-            let model = cli
-                .model
-                .as_deref()
-                .or(cli.anthropic_model.as_deref())
-                .or(cfg.anthropic_model.as_deref())
-                .unwrap_or("claude-haiku-4-5")
-                .to_string();
+            let model = if let Some(m) = cli.model.as_deref().or(cli.anthropic_model.as_deref()) {
+                m.to_string()
+            } else if let Some(models) = &cfg.anthropic_model {
+                if models.len() > 1 {
+                    bail!(
+                        "model lists are not supported for Anthropic — Anthropic does not expose \
+                         a model listing API; specify a single model name in config"
+                    );
+                }
+                models[0].clone()
+            } else {
+                "claude-haiku-4-5".to_string()
+            };
             Ok(LlmProvider::anthropic(api_key, model))
         }
         "ollama" => {
@@ -502,13 +508,10 @@ async fn build_provider(cli: &Cli, cfg: &Config) -> Result<LlmProvider> {
                 .unwrap_or("http://localhost:11434")
                 .to_string();
             // Priority: --model > --ollama-model / OLLAMA_MODEL > config file > auto-detect
-            let model = if let Some(m) = cli
-                .model
-                .as_deref()
-                .or(cli.ollama_model.as_deref())
-                .or(cfg.ollama_model.as_deref())
-            {
+            let model = if let Some(m) = cli.model.as_deref().or(cli.ollama_model.as_deref()) {
                 m.to_string()
+            } else if let Some(models) = &cfg.ollama_model {
+                pick_model_from_list(models, &url).await?
             } else {
                 pick_ollama_model(&url).await
             };
@@ -516,6 +519,24 @@ async fn build_provider(cli: &Cli, cfg: &Config) -> Result<LlmProvider> {
         }
         other => bail!("unknown provider '{other}' — expected 'anthropic' or 'ollama'"),
     }
+}
+
+/// Given an ordered preference list from config, query Ollama and return the first
+/// configured model that is actually installed. Errors if none are available.
+async fn pick_model_from_list(models: &[String], base_url: &str) -> Result<String> {
+    let available = llm::list_ollama_models(base_url)
+        .await
+        .with_context(|| format!("failed to query Ollama models at {base_url}"))?;
+    models
+        .iter()
+        .find(|m| available.iter().any(|a| a == *m))
+        .cloned()
+        .with_context(|| {
+            format!(
+                "none of the configured models ({}) are available on Ollama at {base_url}",
+                models.join(", ")
+            )
+        })
 }
 
 /// Query the running Ollama instance and return the highest-preference model

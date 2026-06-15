@@ -31,13 +31,31 @@ impl std::str::FromStr for CommitFormat {
     }
 }
 
+/// A model value in config: either a single name or an ordered preference list.
+/// When a list is given for Ollama, the first available model is used.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ModelSpec {
+    Single(String),
+    List(Vec<String>),
+}
+
+impl ModelSpec {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            ModelSpec::Single(s) => vec![s],
+            ModelSpec::List(v) => v,
+        }
+    }
+}
+
 /// Resolved tool configuration.
 /// Priority (highest to lowest):
 ///   CLI flag → env var → matching [[projects]] entry → global section → built-in default
 #[derive(Debug, Default)]
 pub struct Config {
-    pub anthropic_model: Option<String>,
-    pub ollama_model: Option<String>,
+    pub anthropic_model: Option<Vec<String>>,
+    pub ollama_model: Option<Vec<String>>,
     pub ollama_url: Option<String>,
     pub commit_format: Option<CommitFormat>,
     pub commit_prompt_extra: Option<String>,
@@ -78,12 +96,12 @@ struct TomlProjectEntry {
 
 #[derive(Debug, Clone, Deserialize)]
 struct TomlAnthropic {
-    model: Option<String>,
+    model: Option<ModelSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct TomlOllama {
-    model: Option<String>,
+    model: Option<ModelSpec>,
     url: Option<String>,
 }
 
@@ -108,10 +126,12 @@ impl Config {
         Config {
             anthropic_model: proj
                 .and_then(|p| p.anthropic.as_ref()?.model.clone())
-                .or_else(|| toml.anthropic.as_ref()?.model.clone()),
+                .or_else(|| toml.anthropic.as_ref()?.model.clone())
+                .map(ModelSpec::into_vec),
             ollama_model: proj
                 .and_then(|p| p.ollama.as_ref()?.model.clone())
-                .or_else(|| toml.ollama.as_ref()?.model.clone()),
+                .or_else(|| toml.ollama.as_ref()?.model.clone())
+                .map(ModelSpec::into_vec),
             ollama_url: proj
                 .and_then(|p| p.ollama.as_ref()?.url.clone())
                 .or_else(|| toml.ollama.as_ref()?.url.clone()),
