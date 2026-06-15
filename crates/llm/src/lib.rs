@@ -57,6 +57,13 @@ impl LlmProvider {
         Self::Ollama(OllamaClient::new(base_url, model))
     }
 
+    pub fn model_name(&self) -> &str {
+        match self {
+            Self::Anthropic(c) => c.model_name(),
+            Self::Ollama(c) => c.model_name(),
+        }
+    }
+
     pub async fn complete(&self, messages: Vec<Message>) -> anyhow::Result<String> {
         match self {
             Self::Anthropic(c) => c.complete(messages).await,

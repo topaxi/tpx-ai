@@ -82,6 +82,10 @@ pub async fn list_models(base_url: &str) -> anyhow::Result<Vec<String>> {
 }
 
 impl OllamaClient {
+    pub fn model_name(&self) -> &str {
+        &self.model
+    }
+
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))

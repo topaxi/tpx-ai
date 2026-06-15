@@ -93,9 +93,10 @@ local function progress_begin()
   end
 end
 
-local function progress_report(msg)
+local function progress_report(msg, model)
   if prog_refs > 0 then
-    emit_progress("report", PROG_TOKEN, "git-commit-ai", msg)
+    local display = model and ("[" .. model .. "] " .. msg) or msg
+    emit_progress("report", PROG_TOKEN, "git-commit-ai", display)
   end
 end
 
@@ -231,8 +232,9 @@ function M.generate(bufnr)
     if not ok or type(event) ~= "table" then return end
 
     if event.kind == "progress" and type(event.msg) == "string" then
+      local model = type(event.model) == "string" and event.model or nil
       vim.schedule(function()
-        progress_report(event.msg)
+        progress_report(event.msg, model)
       end)
     elseif event.kind == "body" and type(event.text) == "string" then
       j_body[#j_body + 1] = "- " .. event.text

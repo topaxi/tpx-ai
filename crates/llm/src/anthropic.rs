@@ -42,6 +42,10 @@ struct ContentBlock {
 }
 
 impl AnthropicClient {
+    pub fn model_name(&self) -> &str {
+        &self.model
+    }
+
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))

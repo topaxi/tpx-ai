@@ -8,8 +8,8 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::Command;
 
-fn emit_progress(msg: &str) {
-    println!("{}", serde_json::json!({"kind": "progress", "msg": msg}));
+fn emit_progress(msg: &str, model: &str) {
+    println!("{}", serde_json::json!({"kind": "progress", "msg": msg, "model": model}));
     let _ = std::io::stdout().flush();
 }
 
@@ -135,22 +135,23 @@ async fn main() -> Result<()> {
     // Dry-run: emit NDJSON events to stdout so the Neovim plugin can parse them
     // as typed events rather than relying on line-prefix heuristics.
     if cli.dry_run {
-        emit_progress(&format!("summarizing {} file(s)…", file_diffs.len()));
+        let model = provider.model_name().to_string();
+        emit_progress(&format!("summarizing {} file(s)…", file_diffs.len()), &model);
         let mut file_summaries = Vec::with_capacity(file_diffs.len());
         for (i, (path, content)) in file_diffs.iter().enumerate() {
-            emit_progress(&format!("{}/{} {}…", i, file_diffs.len(), path));
+            emit_progress(&format!("{}/{} {}…", i, file_diffs.len(), path), &model);
             let summary = summarize_file_diff(path, content, &provider)
                 .await
                 .with_context(|| format!("failed to summarize {path}"))?;
-            emit_progress(&format!("{}/{} {}: {}", i + 1, file_diffs.len(), path, summary));
+            emit_progress(&format!("{}/{} {}: {}", i + 1, file_diffs.len(), path, summary), &model);
             file_summaries.push(format!("{path}: {summary}"));
         }
-        emit_progress("consolidating changes…");
+        emit_progress("consolidating changes…", &model);
         let bullets = consolidate_changes(&file_summaries, &provider).await?;
         for b in &bullets {
             emit_body(b);
         }
-        emit_progress("generating subject…");
+        emit_progress("generating subject…", &model);
         let subject = generate_subject(&bullets, &file_paths, cli.context.as_deref(), format, cfg.commit_prompt_extra.as_deref(), branch.as_deref(), &provider).await?;
         emit_subject(subject.trim());
         return Ok(());
