@@ -34,7 +34,11 @@ local _orig_get_client = nil
 local _client_refs = 0
 
 local function acquire_fake_client()
-  if _client_refs == 0 then
+  -- Gate on the saved original, not the ref count: a release() defers its
+  -- restore by 200ms, so a re-acquire inside that window still sees the patch
+  -- installed. Patching again there would save the *patched* fn as the
+  -- original and leak it permanently. Only patch when truly unpatched.
+  if _orig_get_client == nil then
     _orig_get_client = vim.lsp.get_client_by_id
     vim.lsp.get_client_by_id = function(id)
       if id == FAKE_ID then
@@ -286,6 +290,44 @@ end
 
 -- ── Setup ─────────────────────────────────────────────────────────────────────
 
+-- Trigger generation once the UI is ready.
+--
+-- When `git commit` launches Neovim, the `FileType gitcommit` autocmd fires
+-- during startup, *before* the first screen redraw. Kicking off generation
+-- synchronously there (spawning the job, monkey-patching vim.lsp, emitting
+-- Noice/LSP progress) delays that first paint and leaves the terminal blank.
+--
+-- So we defer: if Neovim hasn't finished entering, wait for VimEnter; otherwise
+-- schedule onto the next loop tick. Either way the buffer is painted first.
+local pending = {} ---@type table<integer, boolean>  -- auto-trigger in flight
+
+local function trigger(bufnr)
+  -- lazy.nvim (and filetype re-detection) can fire `FileType gitcommit` more
+  -- than once for the same buffer. Without this guard each firing would queue
+  -- its own deferred generation, so progress would start twice.
+  if pending[bufnr] then return end
+  pending[bufnr] = true
+
+  local function start()
+    pending[bufnr] = nil
+    -- Buffer may have been wiped, or content typed/filled, while we waited.
+    if not vim.api.nvim_buf_is_valid(bufnr) then return end
+    if has_user_content(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) then
+      return
+    end
+    M.generate(bufnr)
+  end
+
+  if vim.v.vim_did_enter == 1 then
+    vim.schedule(start)
+  else
+    vim.api.nvim_create_autocmd("VimEnter", {
+      once = true,
+      callback = function() vim.schedule(start) end,
+    })
+  end
+end
+
 function M.setup(opts)
   cfg = vim.tbl_deep_extend("force", defaults, opts or {})
 
@@ -300,8 +342,8 @@ function M.setup(opts)
         return
       end
 
-      M.generate(bufnr)
-
+      -- Keymap and cleanup are cheap and don't touch the UI, so wire them up
+      -- now; the actual generation is deferred until the editor is drawn.
       if cfg.keymap then
         vim.keymap.set("n", cfg.keymap, function()
           M.generate(bufnr)
@@ -314,6 +356,8 @@ function M.setup(opts)
         once = true,
         callback = function() clear(bufnr) end,
       })
+
+      trigger(bufnr)
     end,
   })
 end
