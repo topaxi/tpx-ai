@@ -76,11 +76,42 @@ local function emit_progress(kind, token, title, message)
   })
 end
 
+-- ── Shared progress ────────────────────────────────────────────────────────────
+-- All buffers/jobs share a single, ref-counted progress entry. Noice keys a
+-- progress line by client_id+token, so a per-buffer token shows one line *per
+-- buffer* — and more than one gitcommit buffer (verbose commit, git plugins,
+-- session restore) then yields duplicate spinners. One constant token + a ref
+-- count guarantees exactly one line however many generations are in flight.
+
+local PROG_TOKEN = "git-commit-ai"
+local prog_refs = 0
+
+local function progress_begin()
+  prog_refs = prog_refs + 1
+  if prog_refs == 1 then
+    emit_progress("begin", PROG_TOKEN, "git-commit-ai", "starting…")
+  end
+end
+
+local function progress_report(msg)
+  if prog_refs > 0 then
+    emit_progress("report", PROG_TOKEN, "git-commit-ai", msg)
+  end
+end
+
+local function progress_end()
+  if prog_refs <= 0 then return end
+  prog_refs = prog_refs - 1
+  if prog_refs == 0 then
+    emit_progress("end", PROG_TOKEN, "git-commit-ai", nil)
+  end
+end
+
 -- ── Per-buffer state ──────────────────────────────────────────────────────────
 
 local jobs   = {} ---@type table<integer, integer>
 local marks  = {} ---@type table<integer, integer>
-local tokens = {} ---@type table<integer, string>
+local tokens = {} ---@type table<integer, boolean>  -- buffer holds a progress ref
 local gens   = {} ---@type table<integer, integer>
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
@@ -100,7 +131,12 @@ local function has_user_content(lines)
 end
 
 local function insert_message(bufnr, subject, body_lines)
+  -- The job may finish after the user has already written/closed the commit,
+  -- leaving the buffer gone or read-only. Don't error trying to write it.
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
+  if not vim.bo[bufnr].modifiable or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return
+  end
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   if has_user_content(lines) then return end
 
@@ -131,8 +167,8 @@ local function clear(bufnr)
     marks[bufnr] = nil
   end
   if tokens[bufnr] then
-    emit_progress("end", tokens[bufnr], "git-commit-ai", nil)
     tokens[bufnr] = nil
+    progress_end()
     release_fake_client()
   end
   gens[bufnr] = (gens[bufnr] or 0) + 1
@@ -162,17 +198,16 @@ function M.generate(bufnr)
 
   clear(bufnr) -- stops previous job and closes its Noice progress
 
-  local token = "gca-" .. bufnr
   local my_gen = (gens[bufnr] or 0) + 1
   gens[bufnr] = my_gen
 
   acquire_fake_client()
-  tokens[bufnr] = token
+  tokens[bufnr] = true
+  progress_begin()
 
-  -- Defer one tick so the buffer is visible before Noice/extmark appear.
+  -- Defer one tick so the buffer is visible before the extmark appears.
   vim.schedule(function()
     if gens[bufnr] ~= my_gen then return end
-    emit_progress("begin", token, "git-commit-ai", "starting…")
     local hl = virt_hl()
     if hl then
       marks[bufnr] = vim.api.nvim_buf_set_extmark(bufnr, ns, 0, 0, {
@@ -197,7 +232,7 @@ function M.generate(bufnr)
 
     if event.kind == "progress" and type(event.msg) == "string" then
       vim.schedule(function()
-        emit_progress("report", token, "git-commit-ai", event.msg)
+        progress_report(event.msg)
       end)
     elseif event.kind == "body" and type(event.text) == "string" then
       j_body[#j_body + 1] = "- " .. event.text
@@ -257,9 +292,11 @@ function M.generate(bufnr)
         marks[bufnr] = nil
         pcall(vim.api.nvim_del_augroup_by_name, abort_group)
 
-        emit_progress("end", token, "git-commit-ai", nil)
-        tokens[bufnr] = nil
-        vim.defer_fn(release_fake_client, 200)
+        if tokens[bufnr] then
+          tokens[bufnr] = nil
+          progress_end()
+          vim.defer_fn(release_fake_client, 200)
+        end
 
         if code ~= 0 then
           local msg = table.concat(j_err, "\n")
@@ -299,17 +336,19 @@ end
 --
 -- So we defer: if Neovim hasn't finished entering, wait for VimEnter; otherwise
 -- schedule onto the next loop tick. Either way the buffer is painted first.
-local pending = {} ---@type table<integer, boolean>  -- auto-trigger in flight
+-- Tracks buffers we've already auto-triggered, for this buffer's whole
+-- lifetime (cleared on BufDelete). `FileType gitcommit` can fire repeatedly —
+-- lazy.nvim's post-load re-fire, syntax/ftplugin, even after VimEnter — and
+-- each `M.generate` ends any in-flight progress then begins a new one, which
+-- shows up as the progress appearing twice. Auto-trigger at most once.
+local triggered = {} ---@type table<integer, boolean>
+local group ---@type integer  set in setup()
 
 local function trigger(bufnr)
-  -- lazy.nvim (and filetype re-detection) can fire `FileType gitcommit` more
-  -- than once for the same buffer. Without this guard each firing would queue
-  -- its own deferred generation, so progress would start twice.
-  if pending[bufnr] then return end
-  pending[bufnr] = true
+  if triggered[bufnr] then return end
+  triggered[bufnr] = true
 
   local function start()
-    pending[bufnr] = nil
     -- Buffer may have been wiped, or content typed/filled, while we waited.
     if not vim.api.nvim_buf_is_valid(bufnr) then return end
     if has_user_content(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) then
@@ -322,6 +361,7 @@ local function trigger(bufnr)
     vim.schedule(start)
   else
     vim.api.nvim_create_autocmd("VimEnter", {
+      group = group,
       once = true,
       callback = function() vim.schedule(start) end,
     })
@@ -331,13 +371,22 @@ end
 function M.setup(opts)
   cfg = vim.tbl_deep_extend("force", defaults, opts or {})
 
-  local group = vim.api.nvim_create_augroup("GitCommitAI", { clear = true })
+  group = vim.api.nvim_create_augroup("GitCommitAI", { clear = true })
 
   vim.api.nvim_create_autocmd("FileType", {
     group = group,
     pattern = "gitcommit",
     callback = function(ev)
       local bufnr = ev.buf
+
+      -- Only act on the real commit-message buffer. Plugins like committia.vim
+      -- open extra `gitcommit`-filetype windows (a read-only status/diff
+      -- preview) as scratch buffers; generating in those gave duplicate
+      -- progress spinners and a "not modifiable" error. The actual
+      -- COMMIT_EDITMSG is a normal, writable file buffer (empty buftype).
+      local bo = vim.bo[bufnr]
+      if bo.buftype ~= "" or not bo.modifiable then return end
+
       if has_user_content(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) then
         return
       end
@@ -354,7 +403,10 @@ function M.setup(opts)
         group = group,
         buffer = bufnr,
         once = true,
-        callback = function() clear(bufnr) end,
+        callback = function()
+          clear(bufnr)
+          triggered[bufnr] = nil
+        end,
       })
 
       trigger(bufnr)
