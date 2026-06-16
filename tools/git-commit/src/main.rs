@@ -42,9 +42,10 @@ struct Cli {
     #[arg(long = "context", short = 'c')]
     context: Option<String>,
 
-    /// LLM provider: anthropic or ollama
-    #[arg(long, default_value = "anthropic")]
-    provider: String,
+    /// LLM provider: anthropic or ollama [config: provider]
+    /// Auto-detected when omitted: anthropic if ANTHROPIC_API_KEY is set, else ollama.
+    #[arg(long)]
+    provider: Option<String>,
 
     /// Model to use — overrides ANTHROPIC_MODEL / OLLAMA_MODEL and config file
     #[arg(long, short = 'm')]
@@ -523,8 +524,26 @@ const OLLAMA_MODEL_PREFERENCE: &[&str] = &[
     "qwen3.5:0.8b",
 ];
 
+fn auto_detect_provider() -> &'static str {
+    if std::env::var("ANTHROPIC_API_KEY")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        "anthropic"
+    } else {
+        "ollama"
+    }
+}
+
 async fn build_provider(cli: &Cli, cfg: &Config) -> Result<LlmProvider> {
-    match cli.provider.to_lowercase().as_str() {
+    let provider = cli
+        .provider
+        .as_deref()
+        .or(cfg.provider.as_deref())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_else(|| auto_detect_provider().to_string());
+
+    match provider.as_str() {
         "anthropic" | "claude" => {
             let api_key = cli
                 .anthropic_api_key

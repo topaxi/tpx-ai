@@ -54,6 +54,7 @@ impl ModelSpec {
 ///   CLI flag → env var → matching [[projects]] entry → global section → built-in default
 #[derive(Debug, Default)]
 pub struct Config {
+    pub provider: Option<String>,
     pub anthropic_model: Option<Vec<String>>,
     pub ollama_model: Option<Vec<String>>,
     pub ollama_url: Option<String>,
@@ -67,6 +68,8 @@ pub struct Config {
 /// Raw TOML shape for `$XDG_CONFIG_HOME/tpx-ai/config.toml`.
 ///
 /// ```toml
+/// provider = "ollama"
+///
 /// [commit]
 /// format = "conventional"
 ///
@@ -77,9 +80,11 @@ pub struct Config {
 /// [[projects]]
 /// path = "$WORK/other"
 /// ollama.model = "gemma4:12b"
+/// provider = "anthropic"
 /// ```
 #[derive(Debug, Default, Deserialize)]
 struct TomlConfig {
+    provider: Option<String>,
     anthropic: Option<TomlAnthropic>,
     ollama: Option<TomlOllama>,
     commit: Option<TomlCommit>,
@@ -89,6 +94,7 @@ struct TomlConfig {
 #[derive(Debug, Clone, Deserialize)]
 struct TomlProjectEntry {
     path: String,
+    provider: Option<String>,
     anthropic: Option<TomlAnthropic>,
     ollama: Option<TomlOllama>,
     commit: Option<TomlCommit>,
@@ -124,6 +130,9 @@ impl Config {
         });
 
         Config {
+            provider: proj
+                .and_then(|p| p.provider.clone())
+                .or_else(|| toml.provider.clone()),
             anthropic_model: proj
                 .and_then(|p| p.anthropic.as_ref()?.model.clone())
                 .or_else(|| toml.anthropic.as_ref()?.model.clone())
