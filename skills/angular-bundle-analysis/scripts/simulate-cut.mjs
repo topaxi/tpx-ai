@@ -2,26 +2,21 @@
 /**
  * simulate-cut.mjs — how much would the initial bundle shrink if <modules> were lazy?
  *
- * Intention
- * ---------
  * "What-if" estimator. Given one or more module substrings, recomputes the
  * static-import closure from the entry while pruning those modules (simulating
  * moving the provider/import that drags them in behind a lazy boundary), then
- * reports the minified bytes that would leave the initial bundle. Use it to
- * size a refactor BEFORE doing it — e.g. relocating root Material providers to
- * lazy feature routes.
+ * reports the minified bytes that would leave the initial bundle. Use this to
+ * size a refactor BEFORE doing it.
  *
- * Note: this models removing the *eager edge* to the named modules. Anything
- * still reachable through another eager path stays (the report reflects that).
+ * Note: models removing the *eager edge* to the named modules. Anything still
+ * reachable through another eager path stays (the report reflects that).
  *
  * Usage
- * -----
- *   node scripts/angular-bundle-analysis/simulate-cut.mjs <mod-substr> [<mod-substr> ...]
- *   BUNDLE_STATS=path node scripts/angular-bundle-analysis/simulate-cut.mjs <mod-substr> ...
+ *   node simulate-cut.mjs <mod-substr> [<mod-substr> ...] [stats.json]
+ *   BUNDLE_STATS=path node simulate-cut.mjs <mod-substr> ...
  *
- * Example (the paginator + form-field provider cascade)
- *   node scripts/angular-bundle-analysis/simulate-cut.mjs \
- *     material/fesm2022/paginator.mjs material/fesm2022/form-field.mjs
+ * Example
+ *   node simulate-cut.mjs material/fesm2022/paginator.mjs material/fesm2022/form-field.mjs
  */
 import { loadStats, inputClosure, initialChunks, resolveInput, findEntryInput, kb } from './lib.mjs';
 

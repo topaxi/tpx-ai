@@ -2,21 +2,17 @@
 /**
  * package-breakdown.mjs — drill into one package's submodules in the initial bundle.
  *
- * Intention
- * ---------
  * `initial-bundle.mjs` tells you a package is heavy (e.g. @angular/material at
  * ~240 KB); this tells you *which parts*. Aggregates the minified contribution
- * of a single package by its secondary entry point / fesm chunk (button.mjs,
- * select.mjs, _form-field-chunk.mjs, ...), so you can see exactly which
- * components made it into the initial bundle and decide what to lazy-load.
+ * by secondary entry point / fesm chunk (button.mjs, select.mjs, ...), so you
+ * can see exactly which components made it into the initial bundle.
  *
  * Usage
- * -----
- *   node scripts/angular-bundle-analysis/package-breakdown.mjs <package> [stats.json]
+ *   node package-breakdown.mjs <package> [stats.json]
  *
  * Examples
- *   node scripts/angular-bundle-analysis/package-breakdown.mjs @angular/material
- *   node scripts/angular-bundle-analysis/package-breakdown.mjs @angular/cdk
+ *   node package-breakdown.mjs @angular/material
+ *   node package-breakdown.mjs @angular/cdk
  */
 import { loadStats, initialChunks, kb } from './lib.mjs';
 

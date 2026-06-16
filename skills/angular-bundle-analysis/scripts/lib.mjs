@@ -1,28 +1,15 @@
 /**
  * Shared helpers for the angular-bundle-analysis scripts.
  *
- * Intention
- * ---------
- * The Angular esbuild build emits a `stats.json` esbuild *metafile* (when built
- * with `--stats-json`). The metafile describes, for every output chunk, which
- * input files contributed and how many bytes each contributed *after* minifying
- * (`bytesInOutput`), plus the static/dynamic import graph at both the input and
- * output level. These helpers turn that metafile into the queries we actually
- * care about when chasing down the "initial bundle exceeded budget" warning:
- *
- *   - what is reachable from the entry WITHOUT crossing a lazy (dynamic-import)
- *     boundary, i.e. what actually ships in the initial bundle, and
+ * Reads the Angular esbuild metafile (stats.json, emitted by `ng build --stats-json`).
+ * Provides helpers for walking the static-import graph to answer:
+ *   - what is reachable from the entry WITHOUT crossing a lazy (dynamic-import) boundary, and
  *   - how big each contributor is once minified.
  *
- * Usage
- * -----
  * Imported by the sibling scripts; not run directly. All scripts accept the
  * metafile path as their last positional argument or via the BUNDLE_STATS env
  * var. If neither is provided, the path is auto-detected by scanning dist/ for
  * a stats.json one level deep.
- *
- *   Rebuild the stats first:
- *     npm run build -- --source-map --stats-json --named-chunks
  */
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 

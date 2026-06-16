@@ -2,22 +2,17 @@
 /**
  * eager-importers.mjs — why is <module> in the initial bundle?
  *
- * Intention
- * ---------
  * Given a module substring (e.g. `material/fesm2022/form-field.mjs` or `luxon`),
- * lists every input file in the initial (statically-reachable) graph that
- * imports it. This answers "what is dragging this dependency into the initial
- * bundle?" — usually a root provider, a shared component, or another vendor
- * module that internally depends on it (e.g. Material's paginator pulls in
- * select + tooltip). The fix is then to move that eager importer behind a lazy
- * boundary.
+ * lists every input file in the initial (statically-reachable) graph that imports
+ * it. Answers "what is dragging this dependency into the initial bundle?" — usually
+ * a root provider, a shared component, or another vendor module that internally
+ * depends on it. The fix is to move that eager importer behind a lazy boundary.
  *
  * Usage
- * -----
- *   node scripts/angular-bundle-analysis/eager-importers.mjs <module-substring> [stats.json]
+ *   node eager-importers.mjs <module-substring> [stats.json]
  *
  * Example
- *   node scripts/angular-bundle-analysis/eager-importers.mjs material/fesm2022/paginator.mjs
+ *   node eager-importers.mjs material/fesm2022/paginator.mjs
  */
 import { loadStats, inputClosure, staticImports, resolveInput, findEntryInput } from './lib.mjs';
 

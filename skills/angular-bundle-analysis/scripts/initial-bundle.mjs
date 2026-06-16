@@ -2,21 +2,17 @@
 /**
  * initial-bundle.mjs — what ships in the initial bundle, and where the weight is.
  *
- * Intention
- * ---------
  * Reproduces the build's "bundle initial exceeded maximum budget" number from
- * first principles and explains it: walks the static-import graph from the entry
- * chunk, sums the minified contribution (`bytesInOutput`) of every input, and
- * aggregates it by npm package / app area. This is the first thing to run when
- * the initial budget warning appears — it tells you whether the weight is vendor
- * or app code, and which packages dominate.
+ * first principles: walks the static-import graph from the entry chunk, sums
+ * the minified contribution (`bytesInOutput`) of every input, and aggregates by
+ * npm package / app area. Run this first — it tells you whether the weight is
+ * vendor or app code and which packages dominate.
  *
  * Usage
- * -----
- *   node scripts/angular-bundle-analysis/initial-bundle.mjs [path/to/stats.json]
- *   BUNDLE_STATS=dist/.../stats.json node scripts/angular-bundle-analysis/initial-bundle.mjs
+ *   node initial-bundle.mjs [path/to/stats.json]
+ *   BUNDLE_STATS=dist/.../stats.json node initial-bundle.mjs
  *
- * Prereq: build with stats, e.g.
+ * Prereq: build with stats first:
  *   npm run build -- --source-map --stats-json --named-chunks
  */
 import { loadStats, initialChunks, bucketOf, kb } from './lib.mjs';
