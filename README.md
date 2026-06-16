@@ -12,6 +12,8 @@ Reusable skills for [Claude Code](https://claude.ai/code). Each skill lives unde
 
 ### Installing a skill
 
+Each skill is self-contained — the `scripts/` directory is bundled inside the skill folder, so a single symlink or copy is all that's needed.
+
 **Global** (all projects on this machine):
 
 ```bash
@@ -24,17 +26,6 @@ ln -s "$(pwd)/skills/angular-bundle-analysis" ~/.claude/skills/angular-bundle-an
 ```bash
 ln -s "$(pwd)/skills/angular-bundle-analysis" /path/to/project/.claude/skills/angular-bundle-analysis
 ```
-
-### Installing the companion scripts
-
-Skills that use Node scripts expect them at `scripts/<skill-name>/` relative to
-the project root. Copy them in:
-
-```bash
-cp -r scripts/angular-bundle-analysis /path/to/project/scripts/
-```
-
-If you place the scripts elsewhere, update the paths in your installed SKILL.md copy.
 
 ## Neovim Plugin
 
