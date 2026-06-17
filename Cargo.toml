@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/llm", "tools/git-commit"]
+members = ["crates/llm", "tools/git-commit", "tools/claude-status"]
 resolver = "2"
 
 [workspace.dependencies]

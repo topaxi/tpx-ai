@@ -1,0 +1,13 @@
+[package]
+name = "claude-status"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "claude-status"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
