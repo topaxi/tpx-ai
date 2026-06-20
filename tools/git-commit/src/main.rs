@@ -342,7 +342,7 @@ async fn summarize_all(
     file_diffs: &[(String, String)],
     provider: &LlmProvider,
 ) -> Result<Vec<String>> {
-    eprintln!("summarizing {} file(s)…", file_diffs.len());
+    eprintln!("summarizing {} file(s) with {}…", file_diffs.len(), provider.model_name());
     let mut summaries = Vec::with_capacity(file_diffs.len());
 
     for (path, content) in file_diffs {
