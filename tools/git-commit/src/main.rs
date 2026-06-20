@@ -361,6 +361,8 @@ fn truncate_diff(diff: &str, limit: usize) -> &str {
     if diff.len() <= limit {
         return diff;
     }
+    // Snap limit to a char boundary to avoid panicking on multi-byte chars.
+    let limit = diff.floor_char_boundary(limit);
     let within = &diff[..limit];
     // Find the last hunk header inside the limit and truncate before it,
     // but only when at least one earlier hunk exists (so we keep some content).
