@@ -10,24 +10,14 @@ build:
 build-dev:
     cargo build
 
-tpx-shell-dir := env_var_or_default("TPX_SHELL_DIR", env_var("HOME") / "projects" / "tpx-shell")
-
-# Install all tools and the Claude statusLine hook
-install: install-tools install-statusline-hook
-
 # Install all tools for the current user
-install-tools:
+install:
     cargo install --path tools/git-commit
     cargo install --path tools/claude-status
 
 # Install a single tool (e.g.: just install-tool git-commit)
 install-tool tool:
     cargo install --path tools/{{tool}}
-
-# Install the Rust Claude statusLine hook from tpx-shell.
-# Set as statusLine.command in ~/.claude/settings.json; point it at claude-status via TPX_STATUSLINE_CMD.
-install-statusline-hook:
-    cargo install --manifest-path {{tpx-shell-dir}}/daemon/Cargo.toml --bin tpx-shell-claude-statusline-hook
 
 # Lint
 check:

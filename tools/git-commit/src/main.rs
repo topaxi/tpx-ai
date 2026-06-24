@@ -158,11 +158,8 @@ async fn main() -> Result<()> {
         }
         emit_progress("consolidating changes…", &model);
         let bullets = consolidate_changes(&file_summaries, &provider).await?;
-        for b in &bullets {
-            emit_body(b);
-        }
         emit_progress("generating subject…", &model);
-        let subject = generate_subject(
+        let (subject, body_bullets) = generate_subject(
             &bullets,
             &file_paths,
             cli.context.as_deref(),
@@ -172,6 +169,9 @@ async fn main() -> Result<()> {
             &provider,
         )
         .await?;
+        for b in &body_bullets {
+            emit_body(b);
+        }
         emit_subject(subject.trim());
         return Ok(());
     }
@@ -179,7 +179,7 @@ async fn main() -> Result<()> {
     let file_summaries = summarize_all(&file_diffs, &provider).await?;
     eprintln!("consolidating changes…");
     let bullets = consolidate_changes(&file_summaries, &provider).await?;
-    let subject = generate_subject(
+    let (subject, body_bullets) = generate_subject(
         &bullets,
         &file_paths,
         cli.context.as_deref(),
@@ -189,12 +189,16 @@ async fn main() -> Result<()> {
         &provider,
     )
     .await?;
-    let body = bullets
-        .iter()
-        .map(|b| format!("- {b}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let message = format!("{}\n\n{}", subject.trim(), body).trim().to_string();
+    let message = if body_bullets.is_empty() {
+        subject.trim().to_string()
+    } else {
+        let body = body_bullets
+            .iter()
+            .map(|b| format!("- {b}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{}\n\n{}", subject.trim(), body)
+    };
 
     run_commit(&message)?;
     println!("✓ {message}");
@@ -451,7 +455,8 @@ async fn consolidate_changes(
     }
 }
 
-/// Generate the subject line from consolidated bullets.
+/// Generate the subject line from consolidated bullets, returning the subject and
+/// any bullets that add detail beyond what the subject already captures.
 async fn generate_subject(
     bullets: &[String],
     file_paths: &[&str],
@@ -460,18 +465,22 @@ async fn generate_subject(
     prompt_extra: Option<&str>,
     branch: Option<&str>,
     provider: &LlmProvider,
-) -> Result<String> {
+) -> Result<(String, Vec<String>)> {
     let base = match format {
         CommitFormat::Conventional => "\
-Write a single git commit subject line in conventional commit format: type(scope): description.
+Write a git commit subject line in conventional commit format: type(scope): description.
 Rules: imperative mood, ≤72 characters, no period at the end.
-Output only the subject line — nothing else, no explanation.",
+Output the subject on the first line. Then, on subsequent lines, list only the bullets \
+that add meaningful detail not already captured by the subject, each prefixed with \"- \". \
+If the subject alone covers all the information, output only the subject line.",
         CommitFormat::Scoped => "\
-Write a single git commit subject line as: <scope>: <description>.
+Write a git commit subject line as: <scope>: <description>.
 Infer the scope from the affected files and the nature of the changes (subsystem, tool, component, or module name).
 Examples: \"git-commit: add dry-run flag\", \"net/http: fix redirect loop\", \"gitlab-ci: update image\"
 Rules: imperative mood, ≤72 characters, no period at the end. No type prefix (feat/fix/etc).
-Output only the subject line — nothing else, no explanation.",
+Output the subject on the first line. Then, on subsequent lines, list only the bullets \
+that add meaningful detail not already captured by the subject, each prefixed with \"- \". \
+If the subject alone covers all the information, output only the subject line.",
     };
     let system = match prompt_extra {
         Some(extra) => format!("{base}\n{extra}"),
@@ -498,17 +507,23 @@ Output only the subject line — nothing else, no explanation.",
     ));
     let user = parts.join("\n\n");
 
-    let subject = provider
+    let response = provider
         .complete(vec![Message::system(system), Message::user(user)])
         .await
         .context("failed to generate commit subject")?;
 
-    Ok(subject
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-        .to_string())
+    let mut lines = response.lines().filter(|l| !l.trim().is_empty());
+    let subject = lines.next().unwrap_or("").trim().to_string();
+    let remaining: Vec<String> = lines
+        .filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("- ")
+                .or_else(|| l.strip_prefix("* "))
+                .map(|s| s.to_string())
+        })
+        .collect();
+
+    Ok((subject, remaining))
 }
 
 /// Preferred Ollama models, in order. The first one found on the running
