@@ -1,0 +1,228 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 3c1f2a0..9b8e4d1 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,6 +1,7 @@
+ pub mod client;
+ pub mod config;
+ pub mod error;
++pub mod rate_limit;
+ pub mod retry;
+
+ pub use client::Client;
+diff --git a/src/rate_limit.rs b/src/rate_limit.rs
+new file mode 100644
+index 0000000..a1b2c3d
+--- /dev/null
++++ b/src/rate_limit.rs
+@@ -0,0 +1,118 @@
++//! A token-bucket rate limiter for outbound requests.
++//!
++//! The bucket refills continuously at `rate` tokens per second up to a maximum
++//! of `burst` tokens. Each call to [`RateLimiter::acquire`] waits until a token
++//! is available, then consumes it. The limiter is cheap to clone and shares its
++//! state across clones, so a single limiter can guard many concurrent tasks.
++
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++
++use tokio::sync::Mutex;
++
++/// A cloneable, async token-bucket rate limiter.
++#[derive(Clone)]
++pub struct RateLimiter {
++    inner: Arc<Mutex<Bucket>>,
++    rate: f64,
++    burst: f64,
++}
++
++struct Bucket {
++    tokens: f64,
++    last_refill: Instant,
++}
++
++impl RateLimiter {
++    /// Create a limiter that allows `rate` requests per second with a maximum
++    /// burst of `burst` requests. Panics if either value is not positive.
++    pub fn new(rate: f64, burst: f64) -> Self {
++        assert!(rate > 0.0, "rate must be positive");
++        assert!(burst > 0.0, "burst must be positive");
++        RateLimiter {
++            inner: Arc::new(Mutex::new(Bucket {
++                tokens: burst,
++                last_refill: Instant::now(),
++            })),
++            rate,
++            burst,
++        }
++    }
++
++    /// Wait until a token is available, then consume it.
++    pub async fn acquire(&self) {
++        loop {
++            let wait = {
++                let mut bucket = self.inner.lock().await;
++                self.refill(&mut bucket);
++                if bucket.tokens >= 1.0 {
++                    bucket.tokens -= 1.0;
++                    return;
++                }
++                let missing = 1.0 - bucket.tokens;
++                Duration::from_secs_f64(missing / self.rate)
++            };
++            tokio::time::sleep(wait).await;
++        }
++    }
++
++    /// Try to consume a token without waiting. Returns `true` on success.
++    pub async fn try_acquire(&self) -> bool {
++        let mut bucket = self.inner.lock().await;
++        self.refill(&mut bucket);
++        if bucket.tokens >= 1.0 {
++            bucket.tokens -= 1.0;
++            true
++        } else {
++            false
++        }
++    }
++
++    fn refill(&self, bucket: &mut Bucket) {
++        let now = Instant::now();
++        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
++        bucket.tokens = (bucket.tokens + elapsed * self.rate).min(self.burst);
++        bucket.last_refill = now;
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn first_burst_is_immediate() {
++        let limiter = RateLimiter::new(1.0, 3.0);
++        let start = Instant::now();
++        for _ in 0..3 {
++            limiter.acquire().await;
++        }
++        assert!(start.elapsed() < Duration::from_millis(50));
++    }
++
++    #[tokio::test]
++    async fn refuses_when_empty() {
++        let limiter = RateLimiter::new(1.0, 1.0);
++        assert!(limiter.try_acquire().await);
++        assert!(!limiter.try_acquire().await);
++    }
++
++    #[tokio::test]
++    async fn refills_over_time() {
++        let limiter = RateLimiter::new(100.0, 1.0);
++        assert!(limiter.try_acquire().await);
++        tokio::time::sleep(Duration::from_millis(50)).await;
++        assert!(limiter.try_acquire().await);
++    }
++}
+diff --git a/src/client.rs b/src/client.rs
+index 7f3a1b2..c4d5e6f 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -3,6 +3,7 @@ use std::time::Duration;
+ use crate::config::Config;
+ use crate::error::Error;
+ use crate::retry::retry_with_backoff;
++use crate::rate_limit::RateLimiter;
+
+ /// An HTTP client with retry and rate-limiting built in.
+ pub struct Client {
+@@ -10,6 +11,7 @@ pub struct Client {
+     inner: reqwest::Client,
+     config: Config,
++    limiter: RateLimiter,
+ }
+
+ impl Client {
+@@ -20,6 +22,7 @@ impl Client {
+         Client {
+             inner: reqwest::Client::new(),
+             config,
++            limiter: RateLimiter::new(config.rate, config.burst),
+         }
+     }
+
+@@ -31,6 +34,7 @@ impl Client {
+     pub async fn send(&self, req: Request) -> Result<Response, Error> {
++        self.limiter.acquire().await;
+         retry_with_backoff(|| self.inner.execute(req.clone())).await
+     }
+ }
+diff --git a/tests/rate_limit.rs b/tests/rate_limit.rs
+new file mode 100644
+index 0000000..d7e8f90
+--- /dev/null
++++ b/tests/rate_limit.rs
+@@ -0,0 +1,71 @@
++//! Integration tests exercising the rate limiter under concurrent load.
++
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++
++use mylib::rate_limit::RateLimiter;
++use tokio::task::JoinSet;
++
++/// With a burst of 1 and a rate of 10/s, ten concurrent acquirers should take
++/// roughly nine intervals (~900ms) to all complete, never less than the first.
++#[tokio::test]
++async fn concurrent_acquirers_are_paced() {
++    let limiter = RateLimiter::new(10.0, 1.0);
++    let start = Instant::now();
++
++    let mut tasks = JoinSet::new();
++    for _ in 0..10 {
++        let limiter = limiter.clone();
++        tasks.spawn(async move {
++            limiter.acquire().await;
++        });
++    }
++    while let Some(res) = tasks.join_next().await {
++        res.expect("task panicked");
++    }
++
++    let elapsed = start.elapsed();
++    assert!(elapsed >= Duration::from_millis(800), "too fast: {elapsed:?}");
++    assert!(elapsed < Duration::from_millis(2000), "too slow: {elapsed:?}");
++}
++
++/// A shared limiter cloned across tasks must enforce a single global budget,
++/// not one bucket per clone.
++#[tokio::test]
++async fn clones_share_one_budget() {
++    let limiter = RateLimiter::new(1.0, 2.0);
++    let a = limiter.clone();
++    let b = limiter.clone();
++
++    assert!(a.try_acquire().await);
++    assert!(b.try_acquire().await);
++    // Budget of 2 is now spent across both clones.
++    assert!(!a.try_acquire().await);
++    assert!(!b.try_acquire().await);
++}
++
++/// After draining the bucket, waiting one refill interval frees exactly one slot.
++#[tokio::test]
++async fn refill_grants_one_slot_per_interval() {
++    let limiter = RateLimiter::new(20.0, 1.0);
++    assert!(limiter.try_acquire().await);
++    assert!(!limiter.try_acquire().await);
++
++    tokio::time::sleep(Duration::from_millis(60)).await;
++    assert!(limiter.try_acquire().await);
++}
++
++/// Sanity: the limiter is `Send + Sync` so it can cross task boundaries.
++#[test]
++fn limiter_is_send_sync() {
++    fn assert_send_sync<T: Send + Sync>() {}
++    assert_send_sync::<RateLimiter>();
++    assert_send_sync::<Arc<RateLimiter>>();
++}

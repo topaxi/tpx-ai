@@ -1,0 +1,20 @@
+diff --git a/niri/binds.kdl b/niri/binds.kdl
+index 861044f..900a6d1 100644
+--- a/niri/binds.kdl
++++ b/niri/binds.kdl
+@@ -35,6 +35,15 @@ binds {
+     XF86MonBrightnessUp   allow-when-locked=true { spawn "~/.cargo/bin/tpx-qs" "brightness" "+5%"; }
+     XF86MonBrightnessDown allow-when-locked=true { spawn "~/.cargo/bin/tpx-qs" "brightness" "-5%"; }
+
++    // Media keys control the selected MPRIS player and show the media OSD.
++    // Shift+Next/Prev cycle which player is selected. Only play-pause is allowed
++    // when locked (and only to pause); next/prev/cycle omit allow-when-locked.
++    XF86AudioPlay allow-when-locked=true { spawn "~/.cargo/bin/tpx-qs" "media" "play-pause"; }
++    XF86AudioNext { spawn "~/.cargo/bin/tpx-qs" "media" "next"; }
++    XF86AudioPrev { spawn "~/.cargo/bin/tpx-qs" "media" "prev"; }
++    Shift+XF86AudioNext { spawn "~/.cargo/bin/tpx-qs" "media" "cycle-next"; }
++    Shift+XF86AudioPrev { spawn "~/.cargo/bin/tpx-qs" "media" "cycle-prev"; }
++
+     Mod+C { close-window; }
+
+     Mod+Left  { focus-column-left; }

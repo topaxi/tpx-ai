@@ -1,0 +1,15 @@
+diff --git a/src/pagination.rs b/src/pagination.rs
+index 1a2b3c4..5d6e7f8 100644
+--- a/src/pagination.rs
++++ b/src/pagination.rs
+@@ -12,9 +12,9 @@ impl Paginator {
+     /// Return the number of pages needed to display `total` items.
+     pub fn page_count(&self, total: usize) -> usize {
+         if total == 0 {
+             return 0;
+         }
+-        total / self.per_page
++        total.div_ceil(self.per_page)
+     }
+
+     /// Return the zero-based item index at the start of `page`.

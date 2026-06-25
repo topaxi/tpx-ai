@@ -75,13 +75,25 @@ struct Cli {
     /// Print the generated commit message without committing
     #[arg(long)]
     dry_run: bool,
+
+    /// Read the diff from this file instead of `git diff --staged` (use "-" for stdin).
+    /// Intended for evaluating fixtures; implies no commit is made, so pair with --dry-run.
+    #[arg(long)]
+    diff_file: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let diff = staged_diff()?;
+    if cli.diff_file.is_some() && !cli.dry_run {
+        bail!("--diff-file only generates a message; pass --dry-run (it does not commit)");
+    }
+
+    let diff = match cli.diff_file.as_deref() {
+        Some(path) => read_diff_file(path)?,
+        None => staged_diff()?,
+    };
     if diff.is_empty() {
         bail!("no staged changes — run `git add` first");
     }
@@ -136,39 +148,21 @@ async fn main() -> Result<()> {
 
     let file_paths: Vec<&str> = file_diffs.iter().map(|(p, _)| p.as_str()).collect();
 
+    let spec = MessageSpec {
+        file_paths: &file_paths,
+        context: cli.context.as_deref(),
+        format,
+        prompt_extra: cfg.commit_prompt_extra.as_deref(),
+        branch: branch.as_deref(),
+    };
+
     // Dry-run: emit NDJSON events to stdout so the Neovim plugin can parse them
     // as typed events rather than relying on line-prefix heuristics.
     if cli.dry_run {
         let model = provider.model_name().to_string();
-        emit_progress(
-            &format!("summarizing {} file(s)…", file_diffs.len()),
-            &model,
-        );
-        let mut file_summaries = Vec::with_capacity(file_diffs.len());
-        for (i, (path, content)) in file_diffs.iter().enumerate() {
-            emit_progress(&format!("{}/{} {}…", i, file_diffs.len(), path), &model);
-            let summary = summarize_file_diff(path, content, &provider)
-                .await
-                .with_context(|| format!("failed to summarize {path}"))?;
-            emit_progress(
-                &format!("{}/{} {}: {}", i + 1, file_diffs.len(), path, summary),
-                &model,
-            );
-            file_summaries.push(format!("{path}: {summary}"));
-        }
-        emit_progress("consolidating changes…", &model);
-        let bullets = consolidate_changes(&file_summaries, &provider).await?;
-        emit_progress("generating subject…", &model);
-        let (subject, body_bullets) = generate_subject(
-            &bullets,
-            &file_paths,
-            cli.context.as_deref(),
-            format,
-            cfg.commit_prompt_extra.as_deref(),
-            branch.as_deref(),
-            &provider,
-        )
-        .await?;
+        let mut progress = |msg: String| emit_progress(&msg, &model);
+        let (subject, body_bullets) =
+            build_message(&file_diffs, &spec, &provider, &mut progress).await?;
         for b in &body_bullets {
             emit_body(b);
         }
@@ -176,19 +170,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let file_summaries = summarize_all(&file_diffs, &provider).await?;
-    eprintln!("consolidating changes…");
-    let bullets = consolidate_changes(&file_summaries, &provider).await?;
-    let (subject, body_bullets) = generate_subject(
-        &bullets,
-        &file_paths,
-        cli.context.as_deref(),
-        format,
-        cfg.commit_prompt_extra.as_deref(),
-        branch.as_deref(),
-        &provider,
-    )
-    .await?;
+    let mut progress = |msg: String| eprintln!("{msg}");
+    let (subject, body_bullets) =
+        build_message(&file_diffs, &spec, &provider, &mut progress).await?;
     let message = if body_bullets.is_empty() {
         subject.trim().to_string()
     } else {
@@ -219,6 +203,18 @@ fn current_branch() -> Option<String> {
     let branch = String::from_utf8(out.stdout).ok()?;
     let branch = branch.trim();
     (branch != "HEAD").then(|| branch.to_string())
+}
+
+/// Read a diff from a file path, or from stdin when `path` is "-".
+fn read_diff_file(path: &str) -> Result<String> {
+    if path == "-" {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+            .context("failed to read diff from stdin")?;
+        Ok(buf)
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("failed to read diff file {path}"))
+    }
 }
 
 fn staged_diff() -> Result<String> {
@@ -341,22 +337,111 @@ fn matches_any(path: &str, patterns: &[String]) -> bool {
 /// Maximum bytes to send for a single file summary; larger diffs are truncated.
 const MAX_FILE_DIFF_BYTES: usize = 4_000;
 
-/// Summarize every file diff sequentially, printing progress to stderr.
-async fn summarize_all(
-    file_diffs: &[(String, String)],
-    provider: &LlmProvider,
-) -> Result<Vec<String>> {
-    eprintln!("summarizing {} file(s) with {}…", file_diffs.len(), provider.model_name());
-    let mut summaries = Vec::with_capacity(file_diffs.len());
+/// Combined-diff byte budget under which we skip per-file summarization and
+/// generate the message directly from the raw diff. Keeping the literal diff in
+/// front of the model for small commits avoids the paraphrase-then-title chain
+/// that can invent details not present in the change.
+const DIRECT_DIFF_BUDGET: usize = 6_000;
 
-    for (path, content) in file_diffs {
-        eprint!("  {path}…");
-        let summary = summarize_file_diff(path, content, provider).await?;
-        eprintln!(" {summary}");
-        summaries.push(format!("{path}: {summary}"));
+/// Produce the commit subject and any detail bullets for the given file diffs.
+///
+/// Small diffs (within `DIRECT_DIFF_BUDGET`) become a message in a single
+/// grounded call against the raw diff. Larger diffs fall back to the map-reduce
+/// path: summarize each file, consolidate, then title. `progress` receives
+/// human-readable status strings for the caller to surface however it likes.
+/// The non-diff inputs shared across the message-generation stages.
+struct MessageSpec<'a> {
+    file_paths: &'a [&'a str],
+    context: Option<&'a str>,
+    format: CommitFormat,
+    prompt_extra: Option<&'a str>,
+    branch: Option<&'a str>,
+}
+
+async fn build_message(
+    file_diffs: &[(String, String)],
+    spec: &MessageSpec<'_>,
+    provider: &LlmProvider,
+    progress: &mut dyn FnMut(String),
+) -> Result<(String, Vec<String>)> {
+    let total: usize = file_diffs.iter().map(|(_, c)| c.len()).sum();
+
+    if total <= DIRECT_DIFF_BUDGET {
+        progress(format!(
+            "generating message from {} file(s) with {}…",
+            file_diffs.len(),
+            provider.model_name()
+        ));
+        return generate_from_diff(file_diffs, spec, provider).await;
     }
 
-    Ok(summaries)
+    progress(format!(
+        "summarizing {} file(s) with {}…",
+        file_diffs.len(),
+        provider.model_name()
+    ));
+    let mut file_summaries = Vec::with_capacity(file_diffs.len());
+    for (i, (path, content)) in file_diffs.iter().enumerate() {
+        progress(format!("  {}/{} {path}…", i + 1, file_diffs.len()));
+        let summary = summarize_file_diff(path, content, provider)
+            .await
+            .with_context(|| format!("failed to summarize {path}"))?;
+        file_summaries.push(format!("File `{path}`:\n{summary}"));
+    }
+
+    progress("consolidating changes…".to_string());
+    let bullets = consolidate_changes(&file_summaries, provider).await?;
+
+    progress("generating subject…".to_string());
+    generate_subject(&bullets, spec, provider).await
+}
+
+/// Concatenate the per-file diff bodies back into one unified diff.
+fn combined_diff(file_diffs: &[(String, String)]) -> String {
+    file_diffs.iter().map(|(_, c)| c.as_str()).collect()
+}
+
+/// Generate the commit message in a single call from the raw diff, keeping the
+/// model grounded in the literal change rather than a lossy summary.
+async fn generate_from_diff(
+    file_diffs: &[(String, String)],
+    spec: &MessageSpec<'_>,
+    provider: &LlmProvider,
+) -> Result<(String, Vec<String>)> {
+    let mut system = format!(
+        "{}\n{}",
+        subject_rules(spec.format),
+        "Base the message strictly on the diff below. Describe only changes that are \
+         literally present; never infer or add related features, keybindings, options, or \
+         behaviour that does not appear in the diff."
+    );
+    if let Some(extra) = spec.prompt_extra {
+        system.push('\n');
+        system.push_str(extra);
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(b) = spec.branch {
+        parts.push(format!("Branch: {b}"));
+    }
+    if let Some(ctx) = spec.context {
+        parts.push(format!("Context: {ctx}"));
+    }
+    if !spec.file_paths.is_empty() {
+        parts.push(format!("Affected files:\n{}", spec.file_paths.join("\n")));
+    }
+    parts.push(format!(
+        "Diff:\n```diff\n{}\n```",
+        combined_diff(file_diffs).trim_end()
+    ));
+    let user = parts.join("\n\n");
+
+    let response = provider
+        .complete(vec![Message::system(system), Message::user(user)])
+        .await
+        .context("failed to generate commit message")?;
+
+    Ok(parse_subject_and_bullets(&response))
 }
 
 /// Truncate a diff to `limit` bytes, preferring a clean hunk boundary (`\n@@`).
@@ -385,10 +470,12 @@ async fn summarize_file_diff(path: &str, diff: &str, provider: &LlmProvider) -> 
 
     let messages = vec![
         Message::system(
-            "Summarize what this code change does in one concise sentence. \
-             Focus on what behaviour or functionality changes, not which variables or functions were modified. \
-             No filler like 'This change' or 'This commit'. \
-             Output only the summary.",
+            "List the concrete changes this diff makes, as terse bullet points, one per change, \
+             each prefixed with \"- \". \
+             Describe only what the diff literally adds, removes, or changes; \
+             do not infer related features and do not restate unchanged context lines. \
+             Focus on behaviour and functionality, not which variables or functions were modified. \
+             Output only the bullet list.",
         ),
         Message::user(format!("File: {path}\n\n```diff\n{diff}\n```")),
     ];
@@ -406,14 +493,15 @@ async fn consolidate_changes(
     provider: &LlmProvider,
 ) -> Result<Vec<String>> {
     if file_summaries.len() == 1 {
-        let text = file_summaries[0]
-            .split_once(": ")
-            .map(|(_, s)| s.to_string())
-            .unwrap_or_else(|| file_summaries[0].clone());
-        return Ok(vec![text]);
+        let bullets = parse_bullets(&file_summaries[0]);
+        return Ok(if bullets.is_empty() {
+            vec![file_summaries[0].clone()]
+        } else {
+            bullets
+        });
     }
 
-    let input = file_summaries.join("\n");
+    let input = file_summaries.join("\n\n");
     let output = provider
         .complete(vec![
             Message::system(
@@ -430,72 +518,49 @@ async fn consolidate_changes(
         .await
         .context("failed to consolidate changes")?;
 
-    let bullets: Vec<String> = output
-        .lines()
+    let bullets = parse_bullets(&output);
+
+    if bullets.is_empty() {
+        // Fallback: reuse the bullets already gathered in the per-file summaries.
+        Ok(file_summaries.iter().flat_map(|s| parse_bullets(s)).collect())
+    } else {
+        Ok(bullets)
+    }
+}
+
+/// Extract `- `/`* ` prefixed bullet lines from a block of text.
+fn parse_bullets(text: &str) -> Vec<String> {
+    text.lines()
         .filter_map(|l| {
             let l = l.trim();
             l.strip_prefix("- ")
                 .or_else(|| l.strip_prefix("* "))
                 .map(|s| s.to_string())
         })
-        .collect();
-
-    if bullets.is_empty() {
-        // Fallback: strip file paths from the raw summaries
-        Ok(file_summaries
-            .iter()
-            .map(|s| {
-                s.split_once(": ")
-                    .map(|(_, v)| v.to_string())
-                    .unwrap_or_else(|| s.clone())
-            })
-            .collect())
-    } else {
-        Ok(bullets)
-    }
+        .collect()
 }
 
 /// Generate the subject line from consolidated bullets, returning the subject and
 /// any bullets that add detail beyond what the subject already captures.
 async fn generate_subject(
     bullets: &[String],
-    file_paths: &[&str],
-    context: Option<&str>,
-    format: CommitFormat,
-    prompt_extra: Option<&str>,
-    branch: Option<&str>,
+    spec: &MessageSpec<'_>,
     provider: &LlmProvider,
 ) -> Result<(String, Vec<String>)> {
-    let base = match format {
-        CommitFormat::Conventional => "\
-Write a git commit subject line in conventional commit format: type(scope): description.
-Rules: imperative mood, ≤72 characters, no period at the end.
-Output the subject on the first line. Then, on subsequent lines, list only the bullets \
-that add meaningful detail not already captured by the subject, each prefixed with \"- \". \
-If the subject alone covers all the information, output only the subject line.",
-        CommitFormat::Scoped => "\
-Write a git commit subject line as: <scope>: <description>.
-Infer the scope from the affected files and the nature of the changes (subsystem, tool, component, or module name).
-Examples: \"git-commit: add dry-run flag\", \"net/http: fix redirect loop\", \"gitlab-ci: update image\"
-Rules: imperative mood, ≤72 characters, no period at the end. No type prefix (feat/fix/etc).
-Output the subject on the first line. Then, on subsequent lines, list only the bullets \
-that add meaningful detail not already captured by the subject, each prefixed with \"- \". \
-If the subject alone covers all the information, output only the subject line.",
-    };
-    let system = match prompt_extra {
-        Some(extra) => format!("{base}\n{extra}"),
-        None => base.to_string(),
+    let system = match spec.prompt_extra {
+        Some(extra) => format!("{}\n{extra}", subject_rules(spec.format)),
+        None => subject_rules(spec.format).to_string(),
     };
 
     let mut parts: Vec<String> = Vec::new();
-    if let Some(b) = branch {
+    if let Some(b) = spec.branch {
         parts.push(format!("Branch: {b}"));
     }
-    if let Some(ctx) = context {
+    if let Some(ctx) = spec.context {
         parts.push(format!("Context: {ctx}"));
     }
-    if !file_paths.is_empty() {
-        parts.push(format!("Affected files:\n{}", file_paths.join("\n")));
+    if !spec.file_paths.is_empty() {
+        parts.push(format!("Affected files:\n{}", spec.file_paths.join("\n")));
     }
     parts.push(format!(
         "Changes:\n{}",
@@ -512,9 +577,34 @@ If the subject alone covers all the information, output only the subject line.",
         .await
         .context("failed to generate commit subject")?;
 
+    Ok(parse_subject_and_bullets(&response))
+}
+
+/// The base system prompt describing how to write the subject line for a format.
+fn subject_rules(format: CommitFormat) -> &'static str {
+    match format {
+        CommitFormat::Conventional => "\
+Write a git commit subject line in conventional commit format: type(scope): description.
+Rules: imperative mood, ≤72 characters, no period at the end.
+Output the subject on the first line. Then, on subsequent lines, list only the bullets \
+that add meaningful detail not already captured by the subject, each prefixed with \"- \". \
+If the subject alone covers all the information, output only the subject line.",
+        CommitFormat::Scoped => "\
+Write a git commit subject line as: <scope>: <description>.
+Infer the scope from the affected files and the nature of the changes (subsystem, tool, component, or module name).
+Examples: \"git-commit: add dry-run flag\", \"net/http: fix redirect loop\", \"gitlab-ci: update image\"
+Rules: imperative mood, ≤72 characters, no period at the end. No type prefix (feat/fix/etc).
+Output the subject on the first line. Then, on subsequent lines, list only the bullets \
+that add meaningful detail not already captured by the subject, each prefixed with \"- \". \
+If the subject alone covers all the information, output only the subject line.",
+    }
+}
+
+/// Split an LLM response into its first-line subject and any `- `/`* ` bullets.
+fn parse_subject_and_bullets(response: &str) -> (String, Vec<String>) {
     let mut lines = response.lines().filter(|l| !l.trim().is_empty());
     let subject = lines.next().unwrap_or("").trim().to_string();
-    let remaining: Vec<String> = lines
+    let bullets = lines
         .filter_map(|l| {
             let l = l.trim();
             l.strip_prefix("- ")
@@ -522,8 +612,7 @@ If the subject alone covers all the information, output only the subject line.",
                 .map(|s| s.to_string())
         })
         .collect();
-
-    Ok((subject, remaining))
+    (subject, bullets)
 }
 
 /// Preferred Ollama models, in order. The first one found on the running
