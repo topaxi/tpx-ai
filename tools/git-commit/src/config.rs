@@ -148,9 +148,36 @@ struct TomlOllamaModel {
     context: Option<u32>,
 }
 
+/// Accepts all three config syntax variants for an ollama model list:
+///   model = "name"                           (single string)
+///   model = ["name1", "name2"]               (array of strings)
+///   [[ollama.model]]                         (array of tables, supports context)
+///   name = "name"
+///   context = 8192
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum TomlOllamaModelSpec {
+    Single(String),
+    SimpleList(Vec<String>),
+    DetailedList(Vec<TomlOllamaModel>),
+}
+
+impl TomlOllamaModelSpec {
+    fn into_entries(self) -> Vec<TomlOllamaModel> {
+        match self {
+            TomlOllamaModelSpec::Single(s) => vec![TomlOllamaModel { name: s, context: None }],
+            TomlOllamaModelSpec::SimpleList(v) => v
+                .into_iter()
+                .map(|name| TomlOllamaModel { name, context: None })
+                .collect(),
+            TomlOllamaModelSpec::DetailedList(v) => v,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct TomlOllama {
-    model: Option<Vec<TomlOllamaModel>>,
+    model: Option<TomlOllamaModelSpec>,
     url: Option<String>,
     unload_after_commit: Option<bool>,
     keep_alive_after_commit: Option<String>,
@@ -192,16 +219,16 @@ impl Config {
                 .and_then(|p| p.ollama.as_ref()?.model.clone())
                 .or_else(|| host.as_ref().and_then(|h| h.ollama.as_ref()?.model.clone()))
                 .or_else(|| toml.ollama.as_ref()?.model.clone())
-                .map(|entries| entries.into_iter().map(|e| e.name).collect()),
+                .map(|spec| spec.into_entries().into_iter().map(|e| e.name).collect()),
             ollama_model_contexts: [
-                toml.ollama.as_ref().and_then(|o| o.model.as_ref()),
-                host.as_ref().and_then(|h| h.ollama.as_ref()?.model.as_ref()),
-                proj.and_then(|p| p.ollama.as_ref()?.model.as_ref()),
+                toml.ollama.as_ref().and_then(|o| o.model.clone()),
+                host.as_ref().and_then(|h| h.ollama.as_ref()?.model.clone()),
+                proj.and_then(|p| p.ollama.as_ref()?.model.clone()),
             ]
             .into_iter()
             .flatten()
-            .flatten()
-            .filter_map(|e| e.context.map(|ctx| (e.name.clone(), ctx)))
+            .flat_map(|spec| spec.into_entries())
+            .filter_map(|e| e.context.map(|ctx| (e.name, ctx)))
             .collect(),
             ollama_url: proj
                 .and_then(|p| p.ollama.as_ref()?.url.clone())
