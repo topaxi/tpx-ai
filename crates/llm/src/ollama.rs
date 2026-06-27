@@ -49,6 +49,14 @@ struct ModelEntry {
     name: String,
 }
 
+/// Request body used to load/unload a model without generating text.
+/// `keep_alive: 0` tells Ollama to evict the model from memory immediately.
+#[derive(Serialize)]
+struct KeepAliveRequest<'a> {
+    model: &'a str,
+    keep_alive: u32,
+}
+
 /// Remove `<think>…</think>` reasoning blocks emitted by thinking models
 /// (e.g. qwen3, deepseek-r1) and return the remaining text trimmed.
 fn strip_thinking(s: &str) -> String {
@@ -84,6 +92,26 @@ pub async fn list_models(base_url: &str) -> anyhow::Result<Vec<String>> {
     Ok(tags.models.into_iter().map(|m| m.name).collect())
 }
 
+/// Return the names of the models currently loaded in memory (the `/api/ps`
+/// endpoint). These are the models that are "running" and consuming RAM/VRAM.
+pub async fn running_models(base_url: &str) -> anyhow::Result<Vec<String>> {
+    let url = format!("{}/api/ps", base_url.trim_end_matches('/'));
+    let resp = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("failed to build HTTP client")
+        .get(&url)
+        .send()
+        .await
+        .context("failed to reach Ollama")?;
+    let ps: TagsResponse = resp
+        .json()
+        .await
+        .context("failed to parse Ollama running model list")?;
+    Ok(ps.models.into_iter().map(|m| m.name).collect())
+}
+
 impl OllamaClient {
     pub fn model_name(&self) -> &str {
         &self.model
@@ -100,6 +128,36 @@ impl OllamaClient {
             base_url: base_url.into(),
             model: model.into(),
         }
+    }
+
+    /// Whether this client's model is currently loaded in Ollama's memory.
+    pub async fn is_loaded(&self) -> anyhow::Result<bool> {
+        let running = running_models(&self.base_url).await?;
+        Ok(running.iter().any(|m| m == &self.model))
+    }
+
+    /// Evict this client's model from Ollama's memory by issuing an empty
+    /// request with `keep_alive: 0`.
+    pub async fn unload(&self) -> anyhow::Result<()> {
+        let url = format!("{}/api/generate", self.base_url.trim_end_matches('/'));
+        let request = KeepAliveRequest {
+            model: &self.model,
+            keep_alive: 0,
+        };
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("failed to send unload request to Ollama")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("Ollama returned {status} on unload: {body}");
+        }
+        Ok(())
     }
 
     pub async fn complete(&self, messages: Vec<Message>) -> anyhow::Result<String> {

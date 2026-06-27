@@ -67,6 +67,12 @@ struct Cli {
     #[arg(long, env = "OLLAMA_HOST")]
     ollama_url: Option<String>,
 
+    /// Unload the Ollama model after committing if it was not already loaded
+    /// before this run. Frees memory on low-memory devices. Also enabled via
+    /// GIT_COMMIT_OLLAMA_UNLOAD=1 or `ollama.unload_after_commit` in config.
+    #[arg(long)]
+    ollama_unload: bool,
+
     /// Commit message format: "conventional" (type(scope): desc) or "scoped" (scope: desc)
     /// [env: GIT_COMMIT_FORMAT] [config: commit.format]
     #[arg(long)]
@@ -121,6 +127,23 @@ async fn main() -> Result<()> {
 
     let branch = current_branch();
     let provider = build_provider(&cli, &cfg).await?;
+
+    // Resolve the unload toggle: CLI flag > env var > config > default off.
+    let unload_ollama = cli.ollama_unload
+        || env_truthy("GIT_COMMIT_OLLAMA_UNLOAD")
+        || cfg.ollama_unload_after_commit.unwrap_or(false);
+
+    // Snapshot whether the model is already resident before we load it. On
+    // error or for non-Ollama providers, assume loaded so we never unload a
+    // model the user had running for other purposes.
+    let model_was_loaded = if unload_ollama {
+        match provider.as_ollama() {
+            Some(client) => client.is_loaded().await.unwrap_or(true),
+            None => true,
+        }
+    } else {
+        true
+    };
 
     let all_diffs = split_into_file_diffs(&diff);
     if all_diffs.is_empty() {
@@ -187,7 +210,27 @@ async fn main() -> Result<()> {
     run_commit(&message)?;
     println!("✓ {message}");
 
+    // Accepted race: if another consumer started using this model between our
+    // pre-run ps check and here, the keep_alive:0 evicts it for them too. Ollama
+    // exposes no refcount/lease, and the worst case is a redundant reload (never
+    // data loss), so we evict immediately to honour the low-memory intent.
+    if unload_ollama && !model_was_loaded {
+        if let Some(client) = provider.as_ollama() {
+            match client.unload().await {
+                Ok(()) => eprintln!("unloaded Ollama model {}", provider.model_name()),
+                Err(e) => eprintln!("warning: failed to unload Ollama model: {e}"),
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Whether an environment variable is set to a truthy value (`1`, `true`, `yes`, `on`).
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 // ── git ──────────────────────────────────────────────────────────────────────

@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
@@ -58,6 +59,9 @@ pub struct Config {
     pub anthropic_model: Option<Vec<String>>,
     pub ollama_model: Option<Vec<String>>,
     pub ollama_url: Option<String>,
+    /// When true, unload the Ollama model after committing if it was not
+    /// already loaded before the run. Helps on low-memory devices.
+    pub ollama_unload_after_commit: Option<bool>,
     pub commit_format: Option<CommitFormat>,
     pub commit_prompt_extra: Option<String>,
     /// Extra glob patterns to exclude, on top of the built-in defaults.
@@ -70,8 +74,17 @@ pub struct Config {
 /// ```toml
 /// provider = "ollama"
 ///
+/// [ollama]
+/// unload_after_commit = true   # free memory on low-memory devices
+///
 /// [commit]
 /// format = "conventional"
+///
+/// [host.vimes]
+/// provider = "anthropic"
+///
+/// [host.vimes.ollama]
+/// url = "http://build-box:11434"
 ///
 /// [[projects]]
 /// path = "~/work/myrepo"
@@ -88,7 +101,16 @@ struct TomlConfig {
     anthropic: Option<TomlAnthropic>,
     ollama: Option<TomlOllama>,
     commit: Option<TomlCommit>,
+    host: Option<HashMap<String, TomlHostEntry>>,
     projects: Option<Vec<TomlProjectEntry>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TomlHostEntry {
+    provider: Option<String>,
+    anthropic: Option<TomlAnthropic>,
+    ollama: Option<TomlOllama>,
+    commit: Option<TomlCommit>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -109,6 +131,7 @@ struct TomlAnthropic {
 struct TomlOllama {
     model: Option<ModelSpec>,
     url: Option<String>,
+    unload_after_commit: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,6 +145,10 @@ impl Config {
     pub fn load() -> Self {
         let toml = load_toml(global_config_path());
 
+        let host = current_hostname().and_then(|name| {
+            toml.host.as_ref()?.get(&name).cloned()
+        });
+
         let proj = git_root().and_then(|root| {
             toml.projects
                 .as_ref()?
@@ -132,23 +159,33 @@ impl Config {
         Config {
             provider: proj
                 .and_then(|p| p.provider.clone())
+                .or_else(|| host.as_ref().and_then(|h| h.provider.clone()))
                 .or_else(|| toml.provider.clone()),
             anthropic_model: proj
                 .and_then(|p| p.anthropic.as_ref()?.model.clone())
+                .or_else(|| host.as_ref().and_then(|h| h.anthropic.as_ref()?.model.clone()))
                 .or_else(|| toml.anthropic.as_ref()?.model.clone())
                 .map(ModelSpec::into_vec),
             ollama_model: proj
                 .and_then(|p| p.ollama.as_ref()?.model.clone())
+                .or_else(|| host.as_ref().and_then(|h| h.ollama.as_ref()?.model.clone()))
                 .or_else(|| toml.ollama.as_ref()?.model.clone())
                 .map(ModelSpec::into_vec),
             ollama_url: proj
                 .and_then(|p| p.ollama.as_ref()?.url.clone())
+                .or_else(|| host.as_ref().and_then(|h| h.ollama.as_ref()?.url.clone()))
                 .or_else(|| toml.ollama.as_ref()?.url.clone()),
+            ollama_unload_after_commit: proj
+                .and_then(|p| p.ollama.as_ref()?.unload_after_commit)
+                .or_else(|| host.as_ref().and_then(|h| h.ollama.as_ref()?.unload_after_commit))
+                .or_else(|| toml.ollama.as_ref()?.unload_after_commit),
             commit_format: proj
                 .and_then(|p| p.commit.as_ref()?.format)
+                .or_else(|| host.as_ref().and_then(|h| h.commit.as_ref()?.format))
                 .or_else(|| toml.commit.as_ref()?.format),
             commit_prompt_extra: proj
                 .and_then(|p| p.commit.as_ref()?.prompt_extra.clone())
+                .or_else(|| host.as_ref().and_then(|h| h.commit.as_ref()?.prompt_extra.clone()))
                 .or_else(|| toml.commit.as_ref()?.prompt_extra.clone()),
             commit_exclude: toml
                 .commit
@@ -156,6 +193,11 @@ impl Config {
                 .and_then(|c| c.exclude.clone())
                 .unwrap_or_default()
                 .into_iter()
+                .chain(
+                    host.as_ref()
+                        .and_then(|h| h.commit.as_ref()?.exclude.clone())
+                        .unwrap_or_default(),
+                )
                 .chain(
                     proj.and_then(|p| p.commit.as_ref()?.exclude.clone())
                         .unwrap_or_default(),
@@ -174,6 +216,10 @@ fn load_toml(path: Option<PathBuf>) -> TomlConfig {
 fn global_config_path() -> Option<PathBuf> {
     let base = dirs::config_dir()?;
     Some(base.join("tpx-ai").join("config.toml"))
+}
+
+fn current_hostname() -> Option<String> {
+    hostname::get().ok()?.into_string().ok()
 }
 
 /// Walk up from the current directory to find the git root.

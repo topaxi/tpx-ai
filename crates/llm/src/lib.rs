@@ -66,6 +66,15 @@ impl LlmProvider {
         Self::Ollama(OllamaClient::new(base_url, model))
     }
 
+    /// Access the underlying Ollama client, when this provider is Ollama.
+    /// Used for provider-specific behaviour like unloading the model.
+    pub fn as_ollama(&self) -> Option<&OllamaClient> {
+        match self {
+            Self::Ollama(c) => Some(c),
+            _ => None,
+        }
+    }
+
     pub fn model_name(&self) -> &str {
         match self {
             Self::Anthropic(c) => c.model_name(),
