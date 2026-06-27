@@ -146,6 +146,15 @@ async fn main() -> Result<()> {
         provider = provider.with_ollama_keep_alive(ka);
     }
 
+    // Apply context window: per-model config > default (8192).
+    let num_ctx = cfg
+        .ollama_model_contexts
+        .get(provider.model_name())
+        .copied();
+    if let Some(ctx) = num_ctx {
+        provider = provider.with_ollama_num_ctx(ctx);
+    }
+
     // Resolve the unload toggle: CLI flag > env var > config > default off.
     let unload_ollama = cli.ollama_unload
         || env_truthy("GIT_COMMIT_OLLAMA_UNLOAD")

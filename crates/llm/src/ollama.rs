@@ -11,6 +11,12 @@ pub struct OllamaClient {
     base_url: String,
     model: String,
     keep_alive: Option<String>,
+    num_ctx: u32,
+}
+
+#[derive(Serialize)]
+struct Options {
+    num_ctx: u32,
 }
 
 #[derive(Serialize)]
@@ -27,6 +33,7 @@ struct Request<'a> {
     /// None the server default (5 minutes) applies.
     #[serde(skip_serializing_if = "Option::is_none")]
     keep_alive: Option<&'a str>,
+    options: Options,
 }
 
 #[derive(Serialize)]
@@ -134,6 +141,7 @@ impl OllamaClient {
             base_url: base_url.into(),
             model: model.into(),
             keep_alive: None,
+            num_ctx: 8192,
         }
     }
 
@@ -142,6 +150,13 @@ impl OllamaClient {
     /// When not set, Ollama's server default (5 minutes) applies.
     pub fn with_keep_alive(mut self, duration: impl Into<String>) -> Self {
         self.keep_alive = Some(duration.into());
+        self
+    }
+
+    /// Override the context window size sent to Ollama (`options.num_ctx`).
+    /// Default is 8192. Use this to match the model's native context size.
+    pub fn with_num_ctx(mut self, num_ctx: u32) -> Self {
+        self.num_ctx = num_ctx;
         self
     }
 
@@ -190,6 +205,7 @@ impl OllamaClient {
             stream: false,
             think: false,
             keep_alive: self.keep_alive.as_deref(),
+            options: Options { num_ctx: self.num_ctx },
         };
 
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));

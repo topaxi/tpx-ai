@@ -53,7 +53,7 @@ impl ModelSpec {
 /// Resolved tool configuration.
 /// Priority (highest to lowest):
 ///   CLI flag → env var → matching [[projects]] entry → global section → built-in default
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Config {
     pub provider: Option<String>,
     pub anthropic_model: Option<Vec<String>>,
@@ -66,6 +66,9 @@ pub struct Config {
     /// multiple commits in a row. Accepts Ollama duration strings ("10m",
     /// "1h", "-1" for indefinite). When None, Ollama's 5-minute default applies.
     pub ollama_keep_alive_after_commit: Option<String>,
+    /// Per-model context window overrides from `[[ollama.model]]` config entries
+    /// that have an explicit `context` field. Keyed by model name.
+    pub ollama_model_contexts: HashMap<String, u32>,
     pub commit_format: Option<CommitFormat>,
     pub commit_prompt_extra: Option<String>,
     /// Extra glob patterns to exclude, on top of the built-in defaults.
@@ -80,6 +83,13 @@ pub struct Config {
 ///
 /// [ollama]
 /// unload_after_commit = true   # free memory on low-memory devices
+///
+/// [[ollama.model]]
+/// name = "gemma4:12b"
+///
+/// [[ollama.model]]
+/// name = "gemma4:e2b"
+/// context = 4096              # override context window for this model
 ///
 /// [commit]
 /// format = "conventional"
@@ -96,7 +106,6 @@ pub struct Config {
 ///
 /// [[projects]]
 /// path = "$WORK/other"
-/// ollama.model = "gemma4:12b"
 /// provider = "anthropic"
 /// ```
 #[derive(Debug, Default, Deserialize)]
@@ -132,8 +141,16 @@ struct TomlAnthropic {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct TomlOllamaModel {
+    name: String,
+    /// Context window size to request from Ollama for this model (`options.num_ctx`).
+    /// When absent, the default (8192) applies.
+    context: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct TomlOllama {
-    model: Option<ModelSpec>,
+    model: Option<Vec<TomlOllamaModel>>,
     url: Option<String>,
     unload_after_commit: Option<bool>,
     keep_alive_after_commit: Option<String>,
@@ -175,7 +192,17 @@ impl Config {
                 .and_then(|p| p.ollama.as_ref()?.model.clone())
                 .or_else(|| host.as_ref().and_then(|h| h.ollama.as_ref()?.model.clone()))
                 .or_else(|| toml.ollama.as_ref()?.model.clone())
-                .map(ModelSpec::into_vec),
+                .map(|entries| entries.into_iter().map(|e| e.name).collect()),
+            ollama_model_contexts: [
+                toml.ollama.as_ref().and_then(|o| o.model.as_ref()),
+                host.as_ref().and_then(|h| h.ollama.as_ref()?.model.as_ref()),
+                proj.and_then(|p| p.ollama.as_ref()?.model.as_ref()),
+            ]
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.context.map(|ctx| (e.name.clone(), ctx)))
+            .collect(),
             ollama_url: proj
                 .and_then(|p| p.ollama.as_ref()?.url.clone())
                 .or_else(|| host.as_ref().and_then(|h| h.ollama.as_ref()?.url.clone()))

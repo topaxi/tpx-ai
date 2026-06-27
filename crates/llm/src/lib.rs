@@ -84,6 +84,15 @@ impl LlmProvider {
         }
     }
 
+    /// Override the context window size on the underlying Ollama client.
+    /// No-op when the provider is not Ollama.
+    pub fn with_ollama_num_ctx(self, num_ctx: u32) -> Self {
+        match self {
+            Self::Ollama(c) => Self::Ollama(c.with_num_ctx(num_ctx)),
+            other => other,
+        }
+    }
+
     pub fn model_name(&self) -> &str {
         match self {
             Self::Anthropic(c) => c.model_name(),
