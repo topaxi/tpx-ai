@@ -10,6 +10,7 @@ pub struct OllamaClient {
     client: Client,
     base_url: String,
     model: String,
+    keep_alive: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -21,6 +22,11 @@ struct Request<'a> {
     /// When thinking is on, these models emit content only in the `thinking`
     /// field and leave `content` empty, producing no usable output.
     think: bool,
+    /// How long Ollama keeps the model loaded after this request. Accepts
+    /// Ollama duration strings ("5m", "1h") or "-1" for indefinite. When
+    /// None the server default (5 minutes) applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -127,7 +133,16 @@ impl OllamaClient {
             client,
             base_url: base_url.into(),
             model: model.into(),
+            keep_alive: None,
         }
+    }
+
+    /// Set the Ollama `keep_alive` duration for all requests made by this client.
+    /// Accepts Ollama duration strings like "10m", "1h", or "-1" (indefinite).
+    /// When not set, Ollama's server default (5 minutes) applies.
+    pub fn with_keep_alive(mut self, duration: impl Into<String>) -> Self {
+        self.keep_alive = Some(duration.into());
+        self
     }
 
     /// Whether this client's model is currently loaded in Ollama's memory.
@@ -174,6 +189,7 @@ impl OllamaClient {
             messages: api_messages,
             stream: false,
             think: false,
+            keep_alive: self.keep_alive.as_deref(),
         };
 
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));

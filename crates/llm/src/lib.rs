@@ -75,6 +75,15 @@ impl LlmProvider {
         }
     }
 
+    /// Set the Ollama `keep_alive` duration on the underlying Ollama client.
+    /// No-op when the provider is not Ollama.
+    pub fn with_ollama_keep_alive(self, duration: impl Into<String>) -> Self {
+        match self {
+            Self::Ollama(c) => Self::Ollama(c.with_keep_alive(duration)),
+            other => other,
+        }
+    }
+
     pub fn model_name(&self) -> &str {
         match self {
             Self::Anthropic(c) => c.model_name(),

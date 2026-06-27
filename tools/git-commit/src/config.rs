@@ -62,6 +62,10 @@ pub struct Config {
     /// When true, unload the Ollama model after committing if it was not
     /// already loaded before the run. Helps on low-memory devices.
     pub ollama_unload_after_commit: Option<bool>,
+    /// Ollama keep_alive duration to set on each request. Useful when doing
+    /// multiple commits in a row. Accepts Ollama duration strings ("10m",
+    /// "1h", "-1" for indefinite). When None, Ollama's 5-minute default applies.
+    pub ollama_keep_alive_after_commit: Option<String>,
     pub commit_format: Option<CommitFormat>,
     pub commit_prompt_extra: Option<String>,
     /// Extra glob patterns to exclude, on top of the built-in defaults.
@@ -132,6 +136,7 @@ struct TomlOllama {
     model: Option<ModelSpec>,
     url: Option<String>,
     unload_after_commit: Option<bool>,
+    keep_alive_after_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -179,6 +184,10 @@ impl Config {
                 .and_then(|p| p.ollama.as_ref()?.unload_after_commit)
                 .or_else(|| host.as_ref().and_then(|h| h.ollama.as_ref()?.unload_after_commit))
                 .or_else(|| toml.ollama.as_ref()?.unload_after_commit),
+            ollama_keep_alive_after_commit: proj
+                .and_then(|p| p.ollama.as_ref()?.keep_alive_after_commit.clone())
+                .or_else(|| host.as_ref().and_then(|h| h.ollama.as_ref()?.keep_alive_after_commit.clone()))
+                .or_else(|| toml.ollama.as_ref()?.keep_alive_after_commit.clone()),
             commit_format: proj
                 .and_then(|p| p.commit.as_ref()?.format)
                 .or_else(|| host.as_ref().and_then(|h| h.commit.as_ref()?.format))

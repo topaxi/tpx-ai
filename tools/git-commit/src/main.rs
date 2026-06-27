@@ -73,6 +73,15 @@ struct Cli {
     #[arg(long)]
     ollama_unload: bool,
 
+    /// Keep the Ollama model loaded for this duration after committing.
+    /// Useful when doing multiple commits in a row — the model stays resident
+    /// so the next invocation does not need to reload it. Accepts Ollama
+    /// duration strings: "10m", "1h", "-1" (indefinite). Overrides the server
+    /// default (5 minutes). Also configurable via GIT_COMMIT_OLLAMA_KEEP_ALIVE
+    /// or `ollama.keep_alive_after_commit` in config.
+    #[arg(long, env = "GIT_COMMIT_OLLAMA_KEEP_ALIVE")]
+    ollama_keep_alive: Option<String>,
+
     /// Commit message format: "conventional" (type(scope): desc) or "scoped" (scope: desc)
     /// [env: GIT_COMMIT_FORMAT] [config: commit.format]
     #[arg(long)]
@@ -126,7 +135,16 @@ async fn main() -> Result<()> {
         .unwrap_or_default();
 
     let branch = current_branch();
-    let provider = build_provider(&cli, &cfg).await?;
+    let mut provider = build_provider(&cli, &cfg).await?;
+
+    // Apply keep_alive: CLI/env > config > default (server's 5-minute default).
+    let keep_alive = cli
+        .ollama_keep_alive
+        .as_deref()
+        .or(cfg.ollama_keep_alive_after_commit.as_deref());
+    if let Some(ka) = keep_alive {
+        provider = provider.with_ollama_keep_alive(ka);
+    }
 
     // Resolve the unload toggle: CLI flag > env var > config > default off.
     let unload_ollama = cli.ollama_unload
