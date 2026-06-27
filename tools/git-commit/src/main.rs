@@ -436,19 +436,26 @@ async fn build_message(
 ) -> Result<(String, Vec<String>)> {
     let total: usize = file_diffs.iter().map(|(_, c)| c.len()).sum();
 
+    let ctx_suffix = provider
+        .ollama_num_ctx()
+        .map(|n| format!(" ctx:{n}"))
+        .unwrap_or_default();
+
     if total <= DIRECT_DIFF_BUDGET {
         progress(format!(
-            "generating message from {} file(s) with {}…",
+            "generating message from {} file(s) with {}{}…",
             file_diffs.len(),
-            provider.model_name()
+            provider.model_name(),
+            ctx_suffix,
         ));
         return generate_from_diff(file_diffs, spec, provider).await;
     }
 
     progress(format!(
-        "summarizing {} file(s) with {}…",
+        "summarizing {} file(s) with {}{}…",
         file_diffs.len(),
-        provider.model_name()
+        provider.model_name(),
+        ctx_suffix,
     ));
     let mut file_summaries = Vec::with_capacity(file_diffs.len());
     for (i, (path, content)) in file_diffs.iter().enumerate() {

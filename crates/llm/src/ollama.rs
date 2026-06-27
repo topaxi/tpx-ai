@@ -160,6 +160,10 @@ impl OllamaClient {
         self
     }
 
+    pub fn num_ctx(&self) -> u32 {
+        self.num_ctx
+    }
+
     /// Whether this client's model is currently loaded in Ollama's memory.
     pub async fn is_loaded(&self) -> anyhow::Result<bool> {
         let running = running_models(&self.base_url).await?;

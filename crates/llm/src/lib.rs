@@ -93,6 +93,14 @@ impl LlmProvider {
         }
     }
 
+    /// Returns the context window size when the provider is Ollama, otherwise None.
+    pub fn ollama_num_ctx(&self) -> Option<u32> {
+        match self {
+            Self::Ollama(c) => Some(c.num_ctx()),
+            _ => None,
+        }
+    }
+
     pub fn model_name(&self) -> &str {
         match self {
             Self::Anthropic(c) => c.model_name(),
