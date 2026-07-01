@@ -385,6 +385,13 @@ fn split_into_file_diffs(diff: &str) -> Vec<(String, String)> {
     result
 }
 
+/// True if this per-file diff is a pure file deletion (git emits a `deleted
+/// file mode` header). Deleted files don't need their content analyzed by the
+/// LLM — the fact that they were removed is the whole story.
+fn is_deleted_file(diff: &str) -> bool {
+    diff.lines().any(|l| l.starts_with("deleted file mode"))
+}
+
 /// Return only the file diffs whose paths match at least one pattern.
 fn filter_diff(diff: &str, patterns: &[String]) -> String {
     split_into_file_diffs(diff)
@@ -459,6 +466,11 @@ async fn build_message(
     ));
     let mut file_summaries = Vec::with_capacity(file_diffs.len());
     for (i, (path, content)) in file_diffs.iter().enumerate() {
+        if is_deleted_file(content) {
+            progress(format!("  {}/{} {path} (deleted)…", i + 1, file_diffs.len()));
+            file_summaries.push(format!("File `{path}`:\n- deleted `{path}`"));
+            continue;
+        }
         progress(format!("  {}/{} {path}…", i + 1, file_diffs.len()));
         let summary = summarize_file_diff(path, content, provider)
             .await
