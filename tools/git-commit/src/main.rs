@@ -467,7 +467,11 @@ async fn build_message(
     let mut file_summaries = Vec::with_capacity(file_diffs.len());
     for (i, (path, content)) in file_diffs.iter().enumerate() {
         if is_deleted_file(content) {
-            progress(format!("  {}/{} {path} (deleted)…", i + 1, file_diffs.len()));
+            progress(format!(
+                "  {}/{} {path} (deleted)…",
+                i + 1,
+                file_diffs.len()
+            ));
             file_summaries.push(format!("File `{path}`:\n- deleted `{path}`"));
             continue;
         }
@@ -611,7 +615,10 @@ async fn consolidate_changes(
 
     if bullets.is_empty() {
         // Fallback: reuse the bullets already gathered in the per-file summaries.
-        Ok(file_summaries.iter().flat_map(|s| parse_bullets(s)).collect())
+        Ok(file_summaries
+            .iter()
+            .flat_map(|s| parse_bullets(s))
+            .collect())
     } else {
         Ok(bullets)
     }
@@ -672,20 +679,34 @@ async fn generate_subject(
 /// The base system prompt describing how to write the subject line for a format.
 fn subject_rules(format: CommitFormat) -> &'static str {
     match format {
-        CommitFormat::Conventional => "\
+        CommitFormat::Conventional => {
+            "\
 Write a git commit subject line in conventional commit format: type(scope): description.
+Derive the scope from the affected file paths listed below: the most specific directory, \
+module, or component the changed files share. Omit the scope entirely rather than guessing \
+when the changes span unrelated areas.
+Never invent a scope that does not appear in the affected file paths, and never reuse a \
+scope from these instructions.
 Rules: imperative mood, ≤72 characters, no period at the end.
 Output the subject on the first line. Then, on subsequent lines, list only the bullets \
 that add meaningful detail not already captured by the subject, each prefixed with \"- \". \
-If the subject alone covers all the information, output only the subject line.",
-        CommitFormat::Scoped => "\
+If the subject alone covers all the information, output only the subject line."
+        }
+        CommitFormat::Scoped => {
+            "\
 Write a git commit subject line as: <scope>: <description>.
-Infer the scope from the affected files and the nature of the changes (subsystem, tool, component, or module name).
-Examples: \"git-commit: add dry-run flag\", \"net/http: fix redirect loop\", \"gitlab-ci: update image\"
+Derive the scope from the affected file paths listed below: the most specific directory, \
+module, or component the changed files share. Strip generic path segments such as \
+src, lib, pkg, internal, and the repository root. Strip file extensions from the scope.
+Never invent a scope that does not appear in the affected file paths, and never reuse a \
+scope from these instructions.
+Examples: for files under net/http/ the scope is \"net/http\"; for a single file \
+config/parser.rs the scope is \"config\".
 Rules: imperative mood, ≤72 characters, no period at the end. No type prefix (feat/fix/etc).
 Output the subject on the first line. Then, on subsequent lines, list only the bullets \
 that add meaningful detail not already captured by the subject, each prefixed with \"- \". \
-If the subject alone covers all the information, output only the subject line.",
+If the subject alone covers all the information, output only the subject line."
+        }
     }
 }
 
