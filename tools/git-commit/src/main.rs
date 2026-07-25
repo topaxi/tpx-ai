@@ -481,14 +481,14 @@ async fn build_message(
             continue;
         }
         progress(format!("  {}/{} {path}…", i + 1, file_diffs.len()));
-        let summary = summarize_file_diff(path, content, provider)
+        let summary = summarize_file_diff(path, content, spec, provider)
             .await
             .with_context(|| format!("failed to summarize {path}"))?;
         file_summaries.push(format!("File `{path}`:\n{summary}"));
     }
 
     progress("consolidating changes…".to_string());
-    let bullets = consolidate_changes(&file_summaries, provider).await?;
+    let bullets = consolidate_changes(&file_summaries, spec, provider).await?;
 
     progress("generating subject…".to_string());
     generate_subject(&bullets, spec, provider).await
@@ -563,20 +563,67 @@ fn truncate_diff(diff: &str, limit: usize) -> &str {
     &diff[..cut]
 }
 
-async fn summarize_file_diff(path: &str, diff: &str, provider: &LlmProvider) -> Result<String> {
+/// Maximum sibling paths to list in a per-file summary's commit frame.
+const MAX_FRAME_FILES: usize = 20;
+
+/// Render the commit-level framing shared by every per-file summary: branch,
+/// user-supplied context, and the other files in the same commit. This is
+/// background only — it tells the model what the commit is about so it can judge
+/// which of a file's changes matter, and is never itself a source of changes.
+fn commit_frame(spec: &MessageSpec<'_>, current: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(b) = spec.branch {
+        parts.push(format!("Branch: {b}"));
+    }
+    if let Some(ctx) = spec.context {
+        parts.push(format!("Commit context: {ctx}"));
+    }
+    let siblings: Vec<&str> = spec
+        .file_paths
+        .iter()
+        .copied()
+        .filter(|p| *p != current)
+        .collect();
+    if !siblings.is_empty() {
+        let shown = siblings.len().min(MAX_FRAME_FILES);
+        let mut list = siblings[..shown].join("\n");
+        if siblings.len() > shown {
+            list.push_str(&format!("\n… and {} more", siblings.len() - shown));
+        }
+        parts.push(format!("Other files changed in this commit:\n{list}"));
+    }
+    parts
+}
+
+async fn summarize_file_diff(
+    path: &str,
+    diff: &str,
+    spec: &MessageSpec<'_>,
+    provider: &LlmProvider,
+) -> Result<String> {
     let diff = truncate_diff(diff, MAX_FILE_DIFF_BYTES);
 
-    let messages = vec![
-        Message::system(
-            "List the concrete changes this diff makes, as terse bullet points, one per change, \
-             each prefixed with \"- \". \
-             Describe only what the diff literally adds, removes, or changes; \
-             do not infer related features and do not restate unchanged context lines. \
-             Focus on behaviour and functionality, not which variables or functions were modified. \
-             Output only the bullet list.",
-        ),
-        Message::user(format!("File: {path}\n\n```diff\n{diff}\n```")),
-    ];
+    let mut parts = commit_frame(spec, path);
+    let framed = !parts.is_empty();
+    parts.push(format!("File: {path}\n\n```diff\n{diff}\n```"));
+
+    let mut system = String::from(
+        "List the concrete changes this diff makes, as terse bullet points, one per change, \
+         each prefixed with \"- \". \
+         Describe only what the diff literally adds, removes, or changes; \
+         do not infer related features and do not restate unchanged context lines. \
+         Focus on behaviour and functionality, not which variables or functions were modified. \
+         Output only the bullet list.",
+    );
+    if framed {
+        system.push_str(
+            " The branch, commit context, and other file names are background only: use them to \
+             decide which changes are significant, never as a source of changes. Summarize only \
+             the diff for the named file, and do not mention the other files.",
+        );
+    }
+
+    let messages = vec![Message::system(system), Message::user(parts.join("\n\n"))];
 
     provider
         .complete(messages)
@@ -588,6 +635,7 @@ async fn summarize_file_diff(path: &str, diff: &str, provider: &LlmProvider) -> 
 /// For a single file the LLM call is skipped — the summary is used directly.
 async fn consolidate_changes(
     file_summaries: &[String],
+    spec: &MessageSpec<'_>,
     provider: &LlmProvider,
 ) -> Result<Vec<String>> {
     if file_summaries.len() == 1 {
@@ -599,13 +647,26 @@ async fn consolidate_changes(
         });
     }
 
-    let input = file_summaries.join("\n\n");
+    let mut parts = Vec::new();
+    if let Some(b) = spec.branch {
+        parts.push(format!("Branch: {b}"));
+    }
+    if let Some(ctx) = spec.context {
+        parts.push(format!("Commit context: {ctx}"));
+    }
+    parts.push(file_summaries.join("\n\n"));
+    let input = parts.join("\n\n");
+
     let output = provider
         .complete(vec![
             Message::system(
-                "You are given per-file change summaries from a git diff.\n\
-                 Synthesize them into a concise bullet list of what this commit achieves: \
+                "You are given per-file change summaries from a git diff, optionally preceded \
+                 by the branch name and the author's own description of the commit.\n\
+                 Synthesize the summaries into a concise bullet list of what this commit achieves: \
                  new behaviour, features, fixes, or capabilities introduced.\n\
+                 Use the branch and commit context to decide which changes are central and which \
+                 are incidental, never as a source of changes: every bullet must be supported by \
+                 the summaries.\n\
                  Group related changes into single bullets. \
                  Focus on the developer-visible outcome, not which files or functions were modified.\n\
                  Imperative mood. One bullet per logical change. Prefix each with \"- \".\n\
