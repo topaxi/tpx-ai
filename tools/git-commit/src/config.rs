@@ -165,10 +165,16 @@ enum TomlOllamaModelSpec {
 impl TomlOllamaModelSpec {
     fn into_entries(self) -> Vec<TomlOllamaModel> {
         match self {
-            TomlOllamaModelSpec::Single(s) => vec![TomlOllamaModel { name: s, context: None }],
+            TomlOllamaModelSpec::Single(s) => vec![TomlOllamaModel {
+                name: s,
+                context: None,
+            }],
             TomlOllamaModelSpec::SimpleList(v) => v
                 .into_iter()
-                .map(|name| TomlOllamaModel { name, context: None })
+                .map(|name| TomlOllamaModel {
+                    name,
+                    context: None,
+                })
                 .collect(),
             TomlOllamaModelSpec::DetailedList(v) => v,
         }
@@ -194,9 +200,7 @@ impl Config {
     pub fn load() -> Self {
         let toml = load_toml(global_config_path());
 
-        let host = current_hostname().and_then(|name| {
-            toml.host.as_ref()?.get(&name).cloned()
-        });
+        let host = current_hostname().and_then(|name| toml.host.as_ref()?.get(&name).cloned());
 
         let proj = git_root().and_then(|root| {
             toml.projects
@@ -212,7 +216,10 @@ impl Config {
                 .or_else(|| toml.provider.clone()),
             anthropic_model: proj
                 .and_then(|p| p.anthropic.as_ref()?.model.clone())
-                .or_else(|| host.as_ref().and_then(|h| h.anthropic.as_ref()?.model.clone()))
+                .or_else(|| {
+                    host.as_ref()
+                        .and_then(|h| h.anthropic.as_ref()?.model.clone())
+                })
                 .or_else(|| toml.anthropic.as_ref()?.model.clone())
                 .map(ModelSpec::into_vec),
             ollama_model: proj
@@ -236,11 +243,17 @@ impl Config {
                 .or_else(|| toml.ollama.as_ref()?.url.clone()),
             ollama_unload_after_commit: proj
                 .and_then(|p| p.ollama.as_ref()?.unload_after_commit)
-                .or_else(|| host.as_ref().and_then(|h| h.ollama.as_ref()?.unload_after_commit))
+                .or_else(|| {
+                    host.as_ref()
+                        .and_then(|h| h.ollama.as_ref()?.unload_after_commit)
+                })
                 .or_else(|| toml.ollama.as_ref()?.unload_after_commit),
             ollama_keep_alive_after_commit: proj
                 .and_then(|p| p.ollama.as_ref()?.keep_alive_after_commit.clone())
-                .or_else(|| host.as_ref().and_then(|h| h.ollama.as_ref()?.keep_alive_after_commit.clone()))
+                .or_else(|| {
+                    host.as_ref()
+                        .and_then(|h| h.ollama.as_ref()?.keep_alive_after_commit.clone())
+                })
                 .or_else(|| toml.ollama.as_ref()?.keep_alive_after_commit.clone()),
             commit_format: proj
                 .and_then(|p| p.commit.as_ref()?.format)
@@ -248,7 +261,10 @@ impl Config {
                 .or_else(|| toml.commit.as_ref()?.format),
             commit_prompt_extra: proj
                 .and_then(|p| p.commit.as_ref()?.prompt_extra.clone())
-                .or_else(|| host.as_ref().and_then(|h| h.commit.as_ref()?.prompt_extra.clone()))
+                .or_else(|| {
+                    host.as_ref()
+                        .and_then(|h| h.commit.as_ref()?.prompt_extra.clone())
+                })
                 .or_else(|| toml.commit.as_ref()?.prompt_extra.clone()),
             commit_exclude: toml
                 .commit

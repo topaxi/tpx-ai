@@ -137,7 +137,11 @@ fn pace_arrow(used_pct: f64, resets_at: Option<u64>, duration: u64, now: u64) ->
     let remaining_m = resets_at.saturating_sub(now) / 60;
     let time_left_m: Option<u64> = if used_pct > 0.0 {
         let tlm = (100.0 - used_pct) * elapsed as f64 / used_pct / 60.0;
-        if tlm >= 0.0 { Some(tlm as u64) } else { None }
+        if tlm >= 0.0 {
+            Some(tlm as u64)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -145,7 +149,13 @@ fn pace_arrow(used_pct: f64, resets_at: Option<u64>, duration: u64, now: u64) ->
     let time_color = match time_left_m {
         Some(tlm) if remaining_m > 0 => {
             let ratio = tlm * 100 / remaining_m;
-            if ratio < 33 { RED } else if ratio < 66 { ORANGE } else { GREEN }
+            if ratio < 33 {
+                RED
+            } else if ratio < 66 {
+                ORANGE
+            } else {
+                GREEN
+            }
         }
         _ => GREEN,
     };
@@ -348,27 +358,38 @@ fn sync_sessions(usage_dir: &Path, real_usage: &str) -> anyhow::Result<()> {
             continue;
         }
         let offset_path = path.with_file_name(format!("{name}_offset"));
-        let _ = std::fs::write(
-            offset_path,
-            format!("{now}\t-{cost}\toffset\t0\t0\t0\n"),
-        );
+        let _ = std::fs::write(offset_path, format!("{now}\t-{cost}\toffset\t0\t0\t0\n"));
     }
 
-    update_config(usage_dir, &[("initial_usage", real_usage), ("start_ts", "0")])
+    update_config(
+        usage_dir,
+        &[("initial_usage", real_usage), ("start_ts", "0")],
+    )
 }
 
 // ── git helpers ───────────────────────────────────────────────────────────────
 
 fn git_branch(cwd: &str) -> Option<String> {
     let out = Command::new("git")
-        .args(["-C", cwd, "--no-optional-locks", "symbolic-ref", "--short", "HEAD"])
+        .args([
+            "-C",
+            cwd,
+            "--no-optional-locks",
+            "symbolic-ref",
+            "--short",
+            "HEAD",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
     let s = std::str::from_utf8(&out.stdout).ok()?.trim();
-    if s.is_empty() { None } else { Some(s.to_string()) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }
 
 struct GitStatus {
@@ -388,7 +409,12 @@ fn git_status(cwd: &str) -> Option<GitStatus> {
     }
     let porcelain = std::str::from_utf8(&out.stdout).ok()?;
     if porcelain.is_empty() {
-        return Some(GitStatus { clean: true, staged: 0, modified: 0, untracked: 0 });
+        return Some(GitStatus {
+            clean: true,
+            staged: 0,
+            modified: 0,
+            untracked: 0,
+        });
     }
 
     let (mut staged, mut modified, mut untracked) = (0usize, 0usize, 0usize);
@@ -408,7 +434,12 @@ fn git_status(cwd: &str) -> Option<GitStatus> {
             untracked += 1;
         }
     }
-    Some(GitStatus { clean: false, staged, modified, untracked })
+    Some(GitStatus {
+        clean: false,
+        staged,
+        modified,
+        untracked,
+    })
 }
 
 // ── statusline ────────────────────────────────────────────────────────────────
@@ -434,11 +465,16 @@ fn run_statusline() -> anyhow::Result<()> {
     let usage_dir = get_usage_dir();
 
     // ── Extract fields ────────────────────────────────────────────────────────
-    let model_raw = status.model.as_ref().and_then(|m| m.display_name.as_deref());
+    let model_raw = status
+        .model
+        .as_ref()
+        .and_then(|m| m.display_name.as_deref());
 
     // "Claude Opus 4.6 (1M context)" → "Opus 4.6 (1M)"
     let model_display: Option<String> = model_raw.map(|m| {
-        m.strip_prefix("Claude ").unwrap_or(m).replace(" context", "")
+        m.strip_prefix("Claude ")
+            .unwrap_or(m)
+            .replace(" context", "")
     });
 
     let cwd = status
@@ -447,20 +483,37 @@ fn run_statusline() -> anyhow::Result<()> {
         .and_then(|w| w.current_dir.as_deref())
         .or(status.cwd.as_deref());
 
-    let used_pct = status.context_window.as_ref().and_then(|c| c.used_percentage);
+    let used_pct = status
+        .context_window
+        .as_ref()
+        .and_then(|c| c.used_percentage);
 
-    let rl_five = status.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref());
+    let rl_five = status
+        .rate_limits
+        .as_ref()
+        .and_then(|r| r.five_hour.as_ref());
     let rl_five_pct = rl_five.and_then(|r| r.used_percentage);
     let rl_five_resets = rl_five.and_then(|r| r.resets_at);
 
-    let rl_seven = status.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref());
+    let rl_seven = status
+        .rate_limits
+        .as_ref()
+        .and_then(|r| r.seven_day.as_ref());
     let rl_seven_pct = rl_seven.and_then(|r| r.used_percentage);
     let rl_seven_resets = rl_seven.and_then(|r| r.resets_at);
 
     let cost_usd = status.cost.as_ref().and_then(|c| c.total_cost_usd);
     let api_duration_ms = status.cost.as_ref().and_then(|c| c.total_api_duration_ms);
-    let lines_added = status.cost.as_ref().and_then(|c| c.total_lines_added).unwrap_or(0);
-    let lines_removed = status.cost.as_ref().and_then(|c| c.total_lines_removed).unwrap_or(0);
+    let lines_added = status
+        .cost
+        .as_ref()
+        .and_then(|c| c.total_lines_added)
+        .unwrap_or(0);
+    let lines_removed = status
+        .cost
+        .as_ref()
+        .and_then(|c| c.total_lines_removed)
+        .unwrap_or(0);
 
     let total_input = status
         .context_window
@@ -492,7 +545,9 @@ fn run_statusline() -> anyhow::Result<()> {
 
     // ── Git ───────────────────────────────────────────────────────────────────
     let branch = cwd.and_then(git_branch);
-    let git_st = cwd.and(branch.as_deref()).and_then(|_| cwd.and_then(git_status));
+    let git_st = cwd
+        .and(branch.as_deref())
+        .and_then(|_| cwd.and_then(git_status));
 
     // ── Write session cost file ───────────────────────────────────────────────
     if let (Some(sid), Some(cost)) = (session_id, cost_usd) {
@@ -625,7 +680,13 @@ fn run_statusline() -> anyhow::Result<()> {
     // Context window %
     if let Some(used) = used_pct {
         let pct = used.round() as i64;
-        let color = if pct >= 80 { RED } else if pct >= 50 { ORANGE } else { CYAN };
+        let color = if pct >= 80 {
+            RED
+        } else if pct >= 50 {
+            ORANGE
+        } else {
+            CYAN
+        };
         seg.clear();
         write!(seg, "{DIM}ctx{RESET} {color}{pct}%{RESET}").unwrap();
         line1.add(&seg);
@@ -634,7 +695,13 @@ fn run_statusline() -> anyhow::Result<()> {
     // Rate limits — 5h
     if let Some(f_pct) = rl_five_pct {
         let f = f_pct.round() as i64;
-        let color = if f >= 80 { RED } else if f >= 50 { YELLOW } else { CYAN };
+        let color = if f >= 80 {
+            RED
+        } else if f >= 50 {
+            YELLOW
+        } else {
+            CYAN
+        };
         let arrow = pace_arrow(f_pct, rl_five_resets, 18000, now);
         seg.clear();
         match rl_five_resets.filter(|&r| r > now) {
@@ -665,7 +732,13 @@ fn run_statusline() -> anyhow::Result<()> {
     // Cache hit rate — shown alongside rate limits
     if rl_five_pct.is_some() || rl_seven_pct.is_some() {
         if let Some(hit) = (cache_read * 100).checked_div(cache_read + cache_create) {
-            let color = if hit >= 80 { GREEN } else if hit >= 50 { CYAN } else { ORANGE };
+            let color = if hit >= 80 {
+                GREEN
+            } else if hit >= 50 {
+                CYAN
+            } else {
+                ORANGE
+            };
             seg.clear();
             write!(seg, "{DIM}cache{RESET} {color}{hit}%{RESET}").unwrap();
             line1.add(&seg);
@@ -689,7 +762,13 @@ fn run_statusline() -> anyhow::Result<()> {
             // Cache hit rate — combine with cost into one add() call
             match (cache_read * 100).checked_div(cache_read + cache_create) {
                 Some(hit) => {
-                    let color = if hit >= 80 { GREEN } else if hit >= 50 { CYAN } else { ORANGE };
+                    let color = if hit >= 80 {
+                        GREEN
+                    } else if hit >= 50 {
+                        CYAN
+                    } else {
+                        ORANGE
+                    };
                     seg.clear();
                     write!(seg, "{cost_seg}{SEP}{DIM}cache{RESET} {color}{hit}%{RESET}").unwrap();
                     line1.add(&seg);
@@ -704,22 +783,30 @@ fn run_statusline() -> anyhow::Result<()> {
                 let net = lines_added - lines_removed;
                 let (net_color, net_sign) = if net >= 0 { (GREEN, "+") } else { (RED, "") };
                 seg.clear();
-                write!(seg, "{DIM}${cpk:.2}/kt{RESET} {net_color}{net_sign}{net}{RESET}").unwrap();
+                write!(
+                    seg,
+                    "{DIM}${cpk:.2}/kt{RESET} {net_color}{net_sign}{net}{RESET}"
+                )
+                .unwrap();
                 line1.add(&seg);
             }
 
             // Budget tracking — accumulated across billing period
-            if let (Some(pt), Some(budget), Some(rate)) =
-                (period_total, config.budget, active_rate)
+            if let (Some(pt), Some(budget), Some(rate)) = (period_total, config.budget, active_rate)
             {
                 if budget > 0.0 {
                     let budget_pct = (pt * 100.0 / budget) as i64;
-                    let bgt_color =
-                        if budget_pct >= 80 { RED } else if budget_pct >= 50 { YELLOW } else { CYAN };
+                    let bgt_color = if budget_pct >= 80 {
+                        RED
+                    } else if budget_pct >= 50 {
+                        YELLOW
+                    } else {
+                        CYAN
+                    };
 
                     let remaining = budget - pt;
-                    let time_left_m: Option<i64> = (rate > 0.0)
-                        .then(|| (remaining * 60.0 / rate) as i64);
+                    let time_left_m: Option<i64> =
+                        (rate > 0.0).then(|| (remaining * 60.0 / rate) as i64);
 
                     let budget_raw = config.budget_raw.as_deref().unwrap_or("");
                     seg.clear();

@@ -256,7 +256,12 @@ async fn main() -> Result<()> {
 /// Whether an environment variable is set to a truthy value (`1`, `true`, `yes`, `on`).
 fn env_truthy(name: &str) -> bool {
     std::env::var(name)
-        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 

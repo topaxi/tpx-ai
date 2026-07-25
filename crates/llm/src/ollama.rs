@@ -209,7 +209,9 @@ impl OllamaClient {
             stream: false,
             think: false,
             keep_alive: self.keep_alive.as_deref(),
-            options: Options { num_ctx: self.num_ctx },
+            options: Options {
+                num_ctx: self.num_ctx,
+            },
         };
 
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
