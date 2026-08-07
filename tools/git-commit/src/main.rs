@@ -30,7 +30,8 @@ fn emit_subject(text: &str) {
 #[command(
     name = "git-commit",
     about = "Generate and create git commits using AI",
-    version
+    version,
+    trailing_var_arg = true
 )]
 struct Cli {
     /// Only include files matching these glob patterns.
@@ -95,6 +96,12 @@ struct Cli {
     /// Intended for evaluating fixtures; implies no commit is made, so pair with --dry-run.
     #[arg(long)]
     diff_file: Option<String>,
+
+    /// Extra arguments forwarded verbatim to `git commit` (e.g. --amend, --no-verify,
+    /// --allow-empty). Must come after all of git-commit's own flags, since the first
+    /// unrecognized argument starts the passthrough. Ignored in --dry-run mode.
+    #[arg(allow_hyphen_values = true)]
+    git_args: Vec<String>,
 }
 
 #[tokio::main]
@@ -234,7 +241,7 @@ async fn main() -> Result<()> {
         format!("{}\n\n{}", subject.trim(), body)
     };
 
-    run_commit(&message)?;
+    run_commit(&message, &cli.git_args)?;
     println!("✓ {message}");
 
     // Accepted race: if another consumer started using this model between our
@@ -306,9 +313,10 @@ fn staged_diff() -> Result<String> {
     String::from_utf8(out.stdout).context("git diff output is not valid UTF-8")
 }
 
-fn run_commit(message: &str) -> Result<()> {
+fn run_commit(message: &str, extra_args: &[String]) -> Result<()> {
     let out = Command::new("git")
         .args(["commit", "-m", message])
+        .args(extra_args)
         .output()
         .context("failed to run `git commit`")?;
 
