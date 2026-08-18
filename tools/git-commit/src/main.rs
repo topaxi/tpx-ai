@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use config::{CommitFormat, Config};
 use llm::{LlmProvider, Message};
-use std::io::Write as _;
+use std::io::{IsTerminal, Write as _};
 use std::path::Path;
 use std::process::Command;
 
@@ -24,6 +24,59 @@ fn emit_body(text: &str) {
 fn emit_subject(text: &str) {
     println!("{}", serde_json::json!({"kind": "subject", "text": text}));
     let _ = std::io::stdout().flush();
+}
+
+/// Surfaces progress and, with `--verbose`, the raw text each LLM step returned.
+///
+/// Progress goes to stdout as NDJSON in dry-run mode (the Neovim plugin parses
+/// it) and to stderr otherwise. Traces always go to stderr so they never
+/// pollute the NDJSON stream or a piped commit message.
+struct Reporter {
+    dry_run: bool,
+    model: String,
+    verbose: bool,
+    dim: bool,
+}
+
+impl Reporter {
+    fn new(dry_run: bool, model: String, verbose: bool) -> Self {
+        let dim =
+            verbose && std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        Self {
+            dry_run,
+            model,
+            verbose,
+            dim,
+        }
+    }
+
+    fn progress(&self, msg: String) {
+        if self.dry_run {
+            emit_progress(&msg, &self.model);
+        } else {
+            eprintln!("{msg}");
+        }
+    }
+
+    /// Echo an LLM step's response, indented under its progress line. Dimmed
+    /// per line so interleaved output and line-based tools stay intact.
+    fn trace(&self, step: &str, text: &str) {
+        if !self.verbose {
+            return;
+        }
+        self.trace_line(&format!("  [{step}]"));
+        for line in text.lines() {
+            self.trace_line(&format!("    {line}"));
+        }
+    }
+
+    fn trace_line(&self, line: &str) {
+        if self.dim {
+            eprintln!("\x1b[2m{line}\x1b[0m");
+        } else {
+            eprintln!("{line}");
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -91,6 +144,11 @@ struct Cli {
     /// Print the generated commit message without committing
     #[arg(long)]
     dry_run: bool,
+
+    /// Echo the raw text each LLM step returns, dimmed, on stderr.
+    /// Also enabled via GIT_COMMIT_VERBOSE=1.
+    #[arg(long, short = 'v')]
+    verbose: bool,
 
     /// Read the diff from this file instead of `git diff --staged` (use "-" for stdin).
     /// Intended for evaluating fixtures; implies no commit is made, so pair with --dry-run.
@@ -213,13 +271,17 @@ async fn main() -> Result<()> {
         branch: branch.as_deref(),
     };
 
+    let reporter = Reporter::new(
+        cli.dry_run,
+        provider.model_name().to_string(),
+        cli.verbose || env_truthy("GIT_COMMIT_VERBOSE"),
+    );
+
     // Dry-run: emit NDJSON events to stdout so the Neovim plugin can parse them
     // as typed events rather than relying on line-prefix heuristics.
     if cli.dry_run {
-        let model = provider.model_name().to_string();
-        let mut progress = |msg: String| emit_progress(&msg, &model);
         let (subject, body_bullets) =
-            build_message(&file_diffs, &spec, &provider, &mut progress).await?;
+            build_message(&file_diffs, &spec, &provider, &reporter).await?;
         for b in &body_bullets {
             emit_body(b);
         }
@@ -227,9 +289,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut progress = |msg: String| eprintln!("{msg}");
-    let (subject, body_bullets) =
-        build_message(&file_diffs, &spec, &provider, &mut progress).await?;
+    let (subject, body_bullets) = build_message(&file_diffs, &spec, &provider, &reporter).await?;
     let message = if body_bullets.is_empty() {
         subject.trim().to_string()
     } else {
@@ -452,7 +512,7 @@ async fn build_message(
     file_diffs: &[(String, String)],
     spec: &MessageSpec<'_>,
     provider: &LlmProvider,
-    progress: &mut dyn FnMut(String),
+    reporter: &Reporter,
 ) -> Result<(String, Vec<String>)> {
     let total: usize = file_diffs.iter().map(|(_, c)| c.len()).sum();
 
@@ -462,16 +522,16 @@ async fn build_message(
         .unwrap_or_default();
 
     if total <= DIRECT_DIFF_BUDGET {
-        progress(format!(
+        reporter.progress(format!(
             "generating message from {} file(s) with {}{}…",
             file_diffs.len(),
             provider.model_name(),
             ctx_suffix,
         ));
-        return generate_from_diff(file_diffs, spec, provider).await;
+        return generate_from_diff(file_diffs, spec, provider, reporter).await;
     }
 
-    progress(format!(
+    reporter.progress(format!(
         "summarizing {} file(s) with {}{}…",
         file_diffs.len(),
         provider.model_name(),
@@ -480,7 +540,7 @@ async fn build_message(
     let mut file_summaries = Vec::with_capacity(file_diffs.len());
     for (i, (path, content)) in file_diffs.iter().enumerate() {
         if is_deleted_file(content) {
-            progress(format!(
+            reporter.progress(format!(
                 "  {}/{} {path} (deleted)…",
                 i + 1,
                 file_diffs.len()
@@ -488,18 +548,18 @@ async fn build_message(
             file_summaries.push(format!("File `{path}`:\n- deleted `{path}`"));
             continue;
         }
-        progress(format!("  {}/{} {path}…", i + 1, file_diffs.len()));
-        let summary = summarize_file_diff(path, content, spec, provider)
+        reporter.progress(format!("  {}/{} {path}…", i + 1, file_diffs.len()));
+        let summary = summarize_file_diff(path, content, spec, provider, reporter)
             .await
             .with_context(|| format!("failed to summarize {path}"))?;
         file_summaries.push(format!("File `{path}`:\n{summary}"));
     }
 
-    progress("consolidating changes…".to_string());
-    let bullets = consolidate_changes(&file_summaries, spec, provider).await?;
+    reporter.progress("consolidating changes…".to_string());
+    let bullets = consolidate_changes(&file_summaries, spec, provider, reporter).await?;
 
-    progress("generating subject…".to_string());
-    generate_subject(&bullets, spec, provider).await
+    reporter.progress("generating subject…".to_string());
+    generate_subject(&bullets, spec, provider, reporter).await
 }
 
 /// Concatenate the per-file diff bodies back into one unified diff.
@@ -513,6 +573,7 @@ async fn generate_from_diff(
     file_diffs: &[(String, String)],
     spec: &MessageSpec<'_>,
     provider: &LlmProvider,
+    reporter: &Reporter,
 ) -> Result<(String, Vec<String>)> {
     let mut system = format!(
         "{}\n{}",
@@ -546,6 +607,7 @@ async fn generate_from_diff(
         .complete(vec![Message::system(system), Message::user(user)])
         .await
         .context("failed to generate commit message")?;
+    reporter.trace("direct", &response);
 
     Ok(parse_subject_and_bullets(&response))
 }
@@ -608,6 +670,7 @@ async fn summarize_file_diff(
     diff: &str,
     spec: &MessageSpec<'_>,
     provider: &LlmProvider,
+    reporter: &Reporter,
 ) -> Result<String> {
     let diff = truncate_diff(diff, MAX_FILE_DIFF_BYTES);
 
@@ -633,10 +696,13 @@ async fn summarize_file_diff(
 
     let messages = vec![Message::system(system), Message::user(parts.join("\n\n"))];
 
-    provider
+    let summary = provider
         .complete(messages)
         .await
-        .with_context(|| format!("failed to summarize {path}"))
+        .with_context(|| format!("failed to summarize {path}"))?;
+    reporter.trace(&format!("summarize {path}"), &summary);
+
+    Ok(summary)
 }
 
 /// Collapse per-file summaries into a short bullet list of conceptual changes.
@@ -645,6 +711,7 @@ async fn consolidate_changes(
     file_summaries: &[String],
     spec: &MessageSpec<'_>,
     provider: &LlmProvider,
+    reporter: &Reporter,
 ) -> Result<Vec<String>> {
     if file_summaries.len() == 1 {
         let bullets = parse_bullets(&file_summaries[0]);
@@ -684,6 +751,7 @@ async fn consolidate_changes(
         ])
         .await
         .context("failed to consolidate changes")?;
+    reporter.trace("consolidate", &output);
 
     let bullets = parse_bullets(&output);
 
@@ -716,6 +784,7 @@ async fn generate_subject(
     bullets: &[String],
     spec: &MessageSpec<'_>,
     provider: &LlmProvider,
+    reporter: &Reporter,
 ) -> Result<(String, Vec<String>)> {
     let system = match spec.prompt_extra {
         Some(extra) => format!("{}\n{extra}", subject_rules(spec.format)),
@@ -746,6 +815,7 @@ async fn generate_subject(
         .complete(vec![Message::system(system), Message::user(user)])
         .await
         .context("failed to generate commit subject")?;
+    reporter.trace("subject", &response);
 
     Ok(parse_subject_and_bullets(&response))
 }

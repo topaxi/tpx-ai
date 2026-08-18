@@ -19,7 +19,14 @@ git-commit --dry-run                # print message, don't commit
 git-commit --provider ollama        # use local Ollama instead of Anthropic
 git-commit -c "closes #42"         # pass extra context to the model
 git-commit --include 'src/*.rs'     # restrict to matching files
+git-commit -v                       # echo each LLM step's response (dimmed, on stderr)
 ```
+
+`--verbose` / `-v` (or `GIT_COMMIT_VERBOSE=1`) prints the raw text every LLM step
+returns - per-file summaries, the consolidated bullets, and the subject - dimmed
+under its progress line. Traces go to stderr, so they stay out of the `--dry-run`
+NDJSON stream and out of piped commit messages. Colour is skipped when stderr is
+not a terminal or `NO_COLOR` is set.
 
 ## Providers
 
